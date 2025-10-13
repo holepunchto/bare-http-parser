@@ -51,12 +51,7 @@ module.exports = exports = class HTTPParser {
   }
 
   end() {
-    const buffer = this._buffer.length === 1 ? this._buffer[0] : Buffer.concat(this._buffer)
-
-    this._buffered = 0
-    this._buffer = []
-
-    return buffer
+    return this._consume(this._buffered)
   }
 
   _consume(n) {
