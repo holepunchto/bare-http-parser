@@ -1,7 +1,6 @@
 const errors = require('./lib/errors')
 
-const DELIMITER = Buffer.from('\r\n')
-const TERMINATOR = Buffer.from('\r\n\r\n')
+const CRFL = Buffer.from('\r\n')
 
 const BEFORE_HEAD = 1
 const BODY = 2
@@ -54,37 +53,43 @@ module.exports = exports = class HTTPParser {
     return this._consume(this._buffered)
   }
 
+  _findCRFL() {
+    const buffer = this._buffer.length === 1 ? this._buffer[0] : Buffer.concat(this._buffer)
+
+    return buffer.indexOf(CRFL)
+  }
+
   _consume(n) {
     const buffer = this._buffer.length === 1 ? this._buffer[0] : Buffer.concat(this._buffer)
 
     this._buffered -= n
-    this._buffer = this._buffered > 0 ? [buffer.subarray(n)] : []
+    this._buffer = this._buffered > 0 ? [buffer.subarray(n + CRFL.byteLength)] : []
 
     return buffer.subarray(0, n)
   }
 
   *_onbeforehead() {
-    const i = findSequence(this._buffer, TERMINATOR)
+    const i = this._findCRFL()
     if (i < 0) return false
 
-    const data = this._consume(i).subarray(0, i - TERMINATOR.byteLength)
+    const data = this._consume(i)
 
-    const lines = data.toString('latin1').split('\r\n')
+    const line = data.toString('latin1')
 
-    if (lines.length === 0) throw errors.INVALID_MESSAGE()
+    if (line.length === 0) throw errors.INVALID_MESSAGE()
 
     const headers = {}
 
-    for (let i = 1, n = lines.length; i < n; i++) {
-      const [name, value] = splitHeader(lines[i])
+    for (const header of this._onheader()) {
+      const [name, value] = header
 
       if (name === null) throw errors.INVALID_HEADER()
 
       headers[name.toLowerCase()] = value
     }
 
-    if (lines[0].startsWith('HTTP/')) {
-      const [version, code, ...reason] = lines[0].split(' ')
+    if (line.startsWith('HTTP/')) {
+      const [version, code, ...reason] = line.split(' ')
 
       yield {
         type: constants.RESPONSE,
@@ -94,7 +99,7 @@ module.exports = exports = class HTTPParser {
         headers
       }
     } else {
-      const [method, url, version] = lines[0].split(' ')
+      const [method, url, version] = line.split(' ')
 
       yield {
         type: constants.REQUEST,
@@ -127,6 +132,15 @@ module.exports = exports = class HTTPParser {
     return true
   }
 
+  *_onheader() {
+    while (true) {
+      const data = this._consume(this._findCRFL())
+
+      if (data.byteLength === 0) return true
+      else yield splitHeader(data.toString('latin1'))
+    }
+  }
+
   *_onbody() {
     const available = Math.min(this._buffered, this._remaining)
 
@@ -152,10 +166,10 @@ module.exports = exports = class HTTPParser {
   }
 
   *_onbeforechunk() {
-    const i = findSequence(this._buffer, DELIMITER)
+    const i = this._findCRFL()
     if (i < 0) return false
 
-    const data = this._consume(i).subarray(0, i - 2)
+    const data = this._consume(i)
 
     const length = parseInt(data.toString(), 16)
 
@@ -165,11 +179,12 @@ module.exports = exports = class HTTPParser {
 
     if (length === 0) {
       this._state = BEFORE_HEAD
+      this._buffer = []
 
       yield { type: constants.END }
     } else {
       this._state = CHUNK
-      this._remaining = length + DELIMITER.byteLength
+      this._remaining = length
     }
 
     return true
@@ -178,7 +193,7 @@ module.exports = exports = class HTTPParser {
   *_onchunk() {
     if (this._buffered < this._remaining) return false
 
-    const data = this._consume(this._remaining).subarray(0, this._remaining - DELIMITER.byteLength)
+    const data = this._consume(this._remaining)
 
     this._state = BEFORE_CHUNK
     this._remaining = -1
@@ -193,25 +208,6 @@ module.exports = exports = class HTTPParser {
 }
 
 exports.constants = constants
-
-function findSequence(buffers, sequence) {
-  let hits = 0
-  let offset = 0
-
-  for (const data of buffers) {
-    for (let i = 0, n = data.byteLength; i < n; i++, offset++) {
-      if (data[i] === sequence[hits]) {
-        hits++
-
-        if (hits === sequence.length) return offset + 1
-      } else {
-        hits = data[i] === sequence[0] ? 1 : 0
-      }
-    }
-  }
-
-  return -1
-}
 
 function splitHeader(header) {
   const i = header.indexOf(': ')
