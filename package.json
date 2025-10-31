@@ -1,6 +1,6 @@
 {
   "name": "bare-http-parser",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Streaming HTTP request and response parser for Bare",
   "exports": {
     "./package": "./package.json",
