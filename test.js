@@ -90,3 +90,103 @@ Location: http://example.com/users/123\r
     ]
   )
 })
+
+test('chunked response', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `HTTP/1.1 201 Created\r
+Transfer-Encoding: chunked\r
+\r
+${(11).toString(16)}\r
+First chunk\r
+${(12).toString(16)}\r
+Second chunk\r
+0\r
+\r\n`
+
+  t.alike(
+    [...parser.push(input)],
+    [
+      {
+        type: RESPONSE,
+        version: 'HTTP/1.1',
+        code: 201,
+        reason: 'Created',
+        headers: {
+          'transfer-encoding': 'chunked'
+        }
+      },
+      {
+        type: DATA,
+        data: Buffer.from('First chunk')
+      },
+      {
+        type: DATA,
+        data: Buffer.from('Second chunk')
+      },
+      {
+        type: END
+      }
+    ]
+  )
+})
+
+test('chunked response, multiple', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `HTTP/1.1 201 Created\r
+Transfer-Encoding: chunked\r
+\r
+${(11).toString(16)}\r
+First chunk\r
+${(12).toString(16)}\r
+Second chunk\r
+0\r
+\r\n`
+
+  t.alike(
+    [...parser.push(input), ...parser.push(input)],
+    [
+      {
+        type: RESPONSE,
+        version: 'HTTP/1.1',
+        code: 201,
+        reason: 'Created',
+        headers: {
+          'transfer-encoding': 'chunked'
+        }
+      },
+      {
+        type: DATA,
+        data: Buffer.from('First chunk')
+      },
+      {
+        type: DATA,
+        data: Buffer.from('Second chunk')
+      },
+      {
+        type: END
+      },
+      {
+        type: RESPONSE,
+        version: 'HTTP/1.1',
+        code: 201,
+        reason: 'Created',
+        headers: {
+          'transfer-encoding': 'chunked'
+        }
+      },
+      {
+        type: DATA,
+        data: Buffer.from('First chunk')
+      },
+      {
+        type: DATA,
+        data: Buffer.from('Second chunk')
+      },
+      {
+        type: END
+      }
+    ]
+  )
+})

@@ -7,6 +7,7 @@ const BEFORE_HEAD = 1
 const BODY = 2
 const BEFORE_CHUNK = 3
 const CHUNK = 4
+const AFTER_LAST_CHUNK = 5
 
 const constants = {
   REQUEST: 1,
@@ -45,6 +46,10 @@ module.exports = exports = class HTTPParser {
 
         case CHUNK:
           if (yield* this._onchunk()) continue
+          else return
+
+        case AFTER_LAST_CHUNK:
+          if (yield* this._onafterlastchunk()) continue
           else return
       }
     }
@@ -155,7 +160,7 @@ module.exports = exports = class HTTPParser {
     const i = findSequence(this._buffer, DELIMITER)
     if (i < 0) return false
 
-    const data = this._consume(i).subarray(0, i - 2)
+    const data = this._consume(i).subarray(0, i - DELIMITER.length)
 
     const length = parseInt(data.toString(), 16)
 
@@ -164,9 +169,7 @@ module.exports = exports = class HTTPParser {
     }
 
     if (length === 0) {
-      this._state = BEFORE_HEAD
-
-      yield { type: constants.END }
+      this._state = AFTER_LAST_CHUNK
     } else {
       this._state = CHUNK
       this._remaining = length + DELIMITER.byteLength
@@ -187,6 +190,19 @@ module.exports = exports = class HTTPParser {
       type: constants.DATA,
       data
     }
+
+    return true
+  }
+
+  *_onafterlastchunk() {
+    const i = findSequence(this._buffer, DELIMITER)
+    if (i < 0) return false
+
+    this._consume(i)
+
+    this._state = BEFORE_HEAD
+
+    yield { type: constants.END }
 
     return true
   }
