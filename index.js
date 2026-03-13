@@ -22,6 +22,8 @@ module.exports = exports = class HTTPParser {
     this._buffer = []
     this._buffered = 0
     this._remaining = -1
+    this._scanOffset = 0
+    this._hits = 0
   }
 
   *push(data, encoding) {
@@ -59,6 +61,40 @@ module.exports = exports = class HTTPParser {
     return this._consume(this._buffered)
   }
 
+  _findSequence(sequence) {
+    let hits = this._hits
+    let offset = 0
+
+    for (const data of this._buffer) {
+      if (offset + data.byteLength <= this._scanOffset) {
+        offset += data.byteLength
+        continue
+      }
+
+      const start = this._scanOffset > offset ? this._scanOffset - offset : 0
+
+      for (let i = start, n = data.byteLength; i < n; i++) {
+        if (data[i] === sequence[hits]) {
+          hits++
+
+          if (hits === sequence.length) {
+            this._scanOffset = 0
+            this._hits = 0
+            return offset + i + 1
+          }
+        } else {
+          hits = data[i] === sequence[0] ? 1 : 0
+        }
+      }
+
+      offset += data.byteLength
+    }
+
+    this._scanOffset = offset
+    this._hits = hits
+    return -1
+  }
+
   _consume(n) {
     const buffer = this._buffer.length === 1 ? this._buffer[0] : Buffer.concat(this._buffer)
 
@@ -69,7 +105,7 @@ module.exports = exports = class HTTPParser {
   }
 
   *_onbeforehead() {
-    const i = findSequence(this._buffer, TERMINATOR)
+    const i = this._findSequence(TERMINATOR)
     if (i < 0) return false
 
     const data = this._consume(i).subarray(0, i - TERMINATOR.byteLength)
@@ -157,7 +193,7 @@ module.exports = exports = class HTTPParser {
   }
 
   *_onbeforechunk() {
-    const i = findSequence(this._buffer, DELIMITER)
+    const i = this._findSequence(DELIMITER)
     if (i < 0) return false
 
     const data = this._consume(i).subarray(0, i - DELIMITER.length)
@@ -195,7 +231,7 @@ module.exports = exports = class HTTPParser {
   }
 
   *_onafterlastchunk() {
-    const i = findSequence(this._buffer, DELIMITER)
+    const i = this._findSequence(DELIMITER)
     if (i < 0) return false
 
     this._consume(i)
@@ -209,25 +245,6 @@ module.exports = exports = class HTTPParser {
 }
 
 exports.constants = constants
-
-function findSequence(buffers, sequence) {
-  let hits = 0
-  let offset = 0
-
-  for (const data of buffers) {
-    for (let i = 0, n = data.byteLength; i < n; i++, offset++) {
-      if (data[i] === sequence[hits]) {
-        hits++
-
-        if (hits === sequence.length) return offset + 1
-      } else {
-        hits = data[i] === sequence[0] ? 1 : 0
-      }
-    }
-  }
-
-  return -1
-}
 
 function splitHeader(header) {
   const i = header.indexOf(': ')
