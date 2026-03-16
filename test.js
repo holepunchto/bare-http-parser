@@ -190,3 +190,25 @@ Second chunk\r
     ]
   )
 })
+
+test('request, byte by byte', (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.from(
+    'POST /users HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello'
+  )
+
+  const results = []
+  for (let i = 0; i < input.byteLength; i++) {
+    for (const msg of parser.push(input.subarray(i, i + 1))) {
+      results.push(msg)
+    }
+  }
+
+  t.is(results[0].type, REQUEST)
+  t.is(results[0].method, 'POST')
+  t.is(results[results.length - 1].type, END)
+
+  const body = Buffer.concat(results.filter((m) => m.type === DATA).map((m) => m.data))
+  t.alike(body, Buffer.from('hello'))
+})
