@@ -123,6 +123,10 @@ module.exports = exports = class HTTPParser {
     if (lines[0].startsWith('HTTP/')) {
       const [version, code, ...reason] = lines[0].split(' ')
 
+      if (version === 'HTTP/1.1' && 'host' in headers === false) {
+        throw errors.INVALID_HEADER(`Header 'Host' is missing`)
+      }
+
       yield {
         type: constants.RESPONSE,
         version,
@@ -132,6 +136,10 @@ module.exports = exports = class HTTPParser {
       }
     } else {
       const [method, url, version] = lines[0].split(' ')
+
+      if (version === 'HTTP/1.1' && 'host' in headers === false) {
+        throw errors.INVALID_HEADER(`Header 'Host' is missing`)
+      }
 
       yield {
         type: constants.REQUEST,
