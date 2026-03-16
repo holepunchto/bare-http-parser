@@ -63,16 +63,14 @@ module.exports = exports = class HTTPParser {
   }
 
   _findSequence(sequence) {
-    let hits = this._hits
-
     for (; this._bufferIndex < this._buffer.length; this._bufferIndex++) {
       const data = this._buffer[this._bufferIndex]
 
       for (; this._byteIndex < data.byteLength; this._byteIndex++) {
-        if (data[this._byteIndex] === sequence[hits]) {
-          hits++
+        if (data[this._byteIndex] === sequence[this._hits]) {
+          this._hits++
 
-          if (hits === sequence.length) {
+          if (this._hits === sequence.length) {
             let position = this._byteIndex + 1
             for (let j = 0; j < this._bufferIndex; j++) position += this._buffer[j].byteLength
 
@@ -82,14 +80,13 @@ module.exports = exports = class HTTPParser {
             return position
           }
         } else {
-          hits = data[this._byteIndex] === sequence[0] ? 1 : 0
+          this._hits = data[this._byteIndex] === sequence[0] ? 1 : 0
         }
       }
 
       this._byteIndex = 0
     }
 
-    this._hits = hits
     return -1
   }
 
