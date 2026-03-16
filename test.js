@@ -40,10 +40,45 @@ name=FirstName+LastName&email=bsmth%40example.com`
   )
 })
 
+test('request, http/1.0 missing host', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /users HTTP/1.0\r
+\r
+`
+
+  t.alike(
+    [...parser.push(input)],
+    [
+      {
+        type: REQUEST,
+        version: 'HTTP/1.0',
+        method: 'GET',
+        url: '/users',
+        headers: {}
+      },
+      {
+        type: END
+      }
+    ]
+  )
+})
+
+test('request, http/1.1 missing host', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /users HTTP/1.1\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
 test('response', (t) => {
   const parser = new HTTPParser()
 
   const input = `HTTP/1.1 201 Created\r
+Host: example.com\r
 Content-Type: application/json\r
 Content-Length: 154\r
 Location: http://example.com/users/123\r
@@ -67,6 +102,7 @@ Location: http://example.com/users/123\r
         code: 201,
         reason: 'Created',
         headers: {
+          host: 'example.com',
           'content-type': 'application/json',
           'content-length': '154',
           location: 'http://example.com/users/123'
@@ -95,6 +131,7 @@ test('chunked response', (t) => {
   const parser = new HTTPParser()
 
   const input = `HTTP/1.1 201 Created\r
+Host: example.com\r
 Transfer-Encoding: chunked\r
 \r
 ${(11).toString(16)}\r
@@ -113,6 +150,7 @@ Second chunk\r
         code: 201,
         reason: 'Created',
         headers: {
+          host: 'example.com',
           'transfer-encoding': 'chunked'
         }
       },
@@ -135,6 +173,7 @@ test('chunked response, multiple', (t) => {
   const parser = new HTTPParser()
 
   const input = `HTTP/1.1 201 Created\r
+Host: example.com\r
 Transfer-Encoding: chunked\r
 \r
 ${(11).toString(16)}\r
@@ -153,6 +192,7 @@ Second chunk\r
         code: 201,
         reason: 'Created',
         headers: {
+          host: 'example.com',
           'transfer-encoding': 'chunked'
         }
       },
@@ -173,6 +213,7 @@ Second chunk\r
         code: 201,
         reason: 'Created',
         headers: {
+          host: 'example.com',
           'transfer-encoding': 'chunked'
         }
       },
