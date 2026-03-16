@@ -24,6 +24,7 @@ module.exports = exports = class HTTPParser {
     this._remaining = -1
     this._bufferIndex = 0
     this._byteIndex = 0
+    this._position = 0
     this._hits = 0
   }
 
@@ -66,16 +67,16 @@ module.exports = exports = class HTTPParser {
     for (; this._bufferIndex < this._buffer.length; this._bufferIndex++) {
       const data = this._buffer[this._bufferIndex]
 
-      for (; this._byteIndex < data.byteLength; this._byteIndex++) {
+      for (; this._byteIndex < data.byteLength; this._byteIndex++, this._position++) {
         if (data[this._byteIndex] === sequence[this._hits]) {
           this._hits++
 
           if (this._hits === sequence.length) {
-            let position = this._byteIndex + 1
-            for (let j = 0; j < this._bufferIndex; j++) position += this._buffer[j].byteLength
+            const position = this._position + 1
 
             this._bufferIndex = 0
             this._byteIndex = 0
+            this._position = 0
             this._hits = 0
             return position
           }
