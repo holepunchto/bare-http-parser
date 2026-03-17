@@ -52,8 +52,10 @@ module.exports = exports = class HTTPParser {
     this._maxHeaderSize = maxHeaderSize
     this._maxHeadersCount = maxHeadersCount
     this._state = FIRST_TOKEN
-    this._buffer = Buffer.alloc(0)
-    this._i = 0
+    this._buffer = []
+    this._bufferIndex = 0
+    this._byteIndex = 0
+    this._buffered = 0
     this._accumulator = []
 
     this._isResponse = false
@@ -74,22 +76,88 @@ module.exports = exports = class HTTPParser {
   *push(data, encoding) {
     if (typeof data === 'string') data = Buffer.from(data, encoding)
 
-    this._buffer = this._buffer.length > 0 ? Buffer.concat([this._buffer, data]) : data
-    this._i = 0
+    this._buffer.push(data)
+    this._buffered += data.byteLength
 
     yield* this._parse()
 
-    this._buffer = this._i < this._buffer.length ? this._buffer.subarray(this._i) : Buffer.alloc(0)
-    this._i = 0
+    this._compact()
   }
 
   end() {
-    const remaining = this._buffer.subarray(this._i)
+    const buffers = this._buffer
+    const bufferIndex = this._bufferIndex
+    const byteIndex = this._byteIndex
 
-    this._buffer = Buffer.alloc(0)
-    this._i = 0
+    this._buffer = []
+    this._bufferIndex = 0
+    this._byteIndex = 0
+    this._buffered = 0
 
-    return remaining
+    if (bufferIndex >= buffers.length) return Buffer.alloc(0)
+
+    buffers[bufferIndex] = buffers[bufferIndex].subarray(byteIndex)
+
+    const remaining = buffers.slice(bufferIndex)
+
+    if (remaining.length === 0) return Buffer.alloc(0)
+    if (remaining.length === 1) return remaining[0]
+
+    return Buffer.concat(remaining)
+  }
+
+  _compact() {
+    if (this._bufferIndex > 0) {
+      this._buffer = this._buffer.slice(this._bufferIndex)
+      this._bufferIndex = 0
+    }
+
+    if (this._byteIndex > 0 && this._buffer.length > 0) {
+      this._buffer[0] = this._buffer[0].subarray(this._byteIndex)
+      this._byteIndex = 0
+    }
+  }
+
+  _consume(n) {
+    this._buffered -= n
+
+    const current = this._buffer[this._bufferIndex]
+
+    if (this._byteIndex + n <= current.byteLength) {
+      const slice = current.subarray(this._byteIndex, this._byteIndex + n)
+
+      this._byteIndex += n
+
+      if (this._byteIndex >= current.byteLength) {
+        this._bufferIndex++
+        this._byteIndex = 0
+      }
+
+      return slice
+    }
+
+    const result = Buffer.allocUnsafe(n)
+
+    let written = 0
+
+    while (written < n) {
+      const buffer = this._buffer[this._bufferIndex]
+      const available = buffer.byteLength - this._byteIndex
+      const take = Math.min(available, n - written)
+
+      buffer.copy(result, written, this._byteIndex, this._byteIndex + take)
+
+      written += take
+
+      this._byteIndex += take
+
+      if (this._byteIndex >= buffer.byteLength) {
+        this._bufferIndex++
+        this._byteIndex = 0
+      }
+    }
+
+    return result
   }
 
   _buildString() {
@@ -121,16 +189,13 @@ module.exports = exports = class HTTPParser {
   }
 
   *_parse() {
-    const buffer = this._buffer
-
     for (;;) {
       if (this._state === BODY) {
-        if (this._i >= buffer.length) return
+        if (this._buffered === 0) return
 
-        const available = Math.min(buffer.length - this._i, this._remaining)
-        const data = buffer.subarray(this._i, this._i + available)
+        const available = Math.min(this._buffered, this._remaining)
+        const data = this._consume(available)
 
-        this._i += available
         this._remaining -= available
 
         const ended = this._remaining === 0
@@ -145,11 +210,11 @@ module.exports = exports = class HTTPParser {
       }
 
       if (this._state === CHUNK_DATA) {
-        if (buffer.length - this._i < this._remaining) return
+        if (this._buffered < this._remaining) return
 
-        const data = buffer.subarray(this._i, this._i + this._remaining - 2)
+        const all = this._consume(this._remaining)
+        const data = all.subarray(0, this._remaining - 2)
 
-        this._i += this._remaining
         this._remaining = 0
         this._state = CHUNK_SIZE
 
@@ -158,9 +223,16 @@ module.exports = exports = class HTTPParser {
         continue
       }
 
-      if (this._i >= buffer.length) return
+      if (this._buffered === 0) return
 
-      const byte = buffer[this._i++]
+      const byte = this._buffer[this._bufferIndex][this._byteIndex++]
+
+      this._buffered--
+
+      if (this._byteIndex >= this._buffer[this._bufferIndex].byteLength) {
+        this._bufferIndex++
+        this._byteIndex = 0
+      }
 
       switch (this._state) {
         case FIRST_TOKEN: {
