@@ -419,6 +419,120 @@ test('request, partial terminator match resets across pushes', (t) => {
   t.is(results[0].headers['x-foo'], 'bar')
 })
 
+test('request, header size exceeded across multiple pushes', async (t) => {
+  const parser = new HTTPParser({ maxHeaderSize: 64 })
+
+  const results = []
+
+  for (const msg of parser.push(Buffer.from('GET / HTTP/1.0\r\n'))) {
+    results.push(msg)
+  }
+
+  for (const msg of parser.push(Buffer.from('X-A: value\r\n'))) {
+    results.push(msg)
+  }
+
+  await t.exception(() => {
+    for (const msg of parser.push(Buffer.from('X-Pad: ' + 'A'.repeat(30) + '\r\n\r\n'))) {
+      results.push(msg)
+    }
+  }, /INVALID/)
+})
+
+test('request, chunk length with leading whitespace', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: example.com\r
+Transfer-Encoding: chunked\r
+\r
+ 5\r
+hello\r
+0\r
+\r\n`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_CHUNK_LENGTH/)
+})
+
+test('request, chunk length with trailing whitespace', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: example.com\r
+Transfer-Encoding: chunked\r
+\r
+5 \r
+hello\r
+0\r
+\r\n`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_CHUNK_LENGTH/)
+})
+
+test('response, non-numeric status code', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `HTTP/1.1 abc OK\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
+test('response, status code out of range', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `HTTP/1.1 99999 OK\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
+test('request, missing url and version', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
+test('request, missing version', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /path\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
+test('request, null byte in header value', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from('GET /users HTTP/1.1\r\nHost: example.com\r\nX-Bad: val'),
+    Buffer.from([0x00]),
+    Buffer.from('ue\r\n\r\n')
+  ])
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
+test('request, control character in header value', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from('GET /users HTTP/1.1\r\nHost: example.com\r\nX-Bad: val'),
+    Buffer.from([0x01]),
+    Buffer.from('ue\r\n\r\n')
+  ])
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
 test('request, byte by byte', (t) => {
   const parser = new HTTPParser()
 

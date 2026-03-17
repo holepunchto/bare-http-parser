@@ -130,6 +130,7 @@ module.exports = exports = class HTTPParser {
       if (name === null) throw errors.INVALID_HEADER()
 
       if (!/^[\x21-\x7e]+$/.test(name)) throw errors.INVALID_HEADER()
+      if (!/^[\x09\x20-\x7e]*$/.test(value)) throw errors.INVALID_HEADER()
 
       const key = name.toLowerCase()
 
@@ -141,17 +142,37 @@ module.exports = exports = class HTTPParser {
     }
 
     if (lines[0].startsWith('HTTP/')) {
-      const [version, code, ...reason] = lines[0].split(' ')
+      let [version = null, code = null, ...reason] = lines[0].split(' ')
+
+      if (version === null) throw errors.INVALID_MESSAGE()
+
+      if (code === null) throw errors.INVALID_MESSAGE()
+
+      if (!/^[0-9]+$/.test(code)) throw errors.INVALID_MESSAGE()
+
+      code = parseInt(code, 10)
+
+      if (!Number.isInteger(code) || code < 100 || code > 999) {
+        throw errors.INVALID_MESSAGE()
+      }
 
       yield {
         type: constants.RESPONSE,
         version,
-        code: parseInt(code, 10),
+        code,
         reason: reason.join(' '),
         headers
       }
     } else {
-      const [method, url, version] = lines[0].split(' ')
+      const [method = null, url = null, version = null] = lines[0].split(' ')
+
+      if (method === null) throw errors.INVALID_MESSAGE()
+
+      if (url === null) throw errors.INVALID_MESSAGE()
+
+      if (version === null) throw errors.INVALID_MESSAGE()
+
+      if (version !== 'HTTP/1.0' && version !== 'HTTP/1.1') throw errors.INVALID_MESSAGE()
 
       if (version === 'HTTP/1.1' && 'host' in headers === false) {
         throw errors.INVALID_HEADER(`Header 'Host' is missing`)
@@ -173,7 +194,11 @@ module.exports = exports = class HTTPParser {
 
       this._state = BEFORE_CHUNK
     } else if (headers['content-length']) {
-      const length = Number(headers['content-length'])
+      let length = headers['content-length']
+
+      if (!/^[0-9]+$/.test(length)) throw errors.INVALID_CONTENT_LENGTH()
+
+      length = parseInt(length, 10)
 
       if (!Number.isInteger(length) || length < 0) {
         throw errors.INVALID_CONTENT_LENGTH()
@@ -222,7 +247,11 @@ module.exports = exports = class HTTPParser {
 
     const data = this._consume(i).subarray(0, i - DELIMITER.length)
 
-    const length = Number('0x' + data.toString())
+    let length = data.toString()
+
+    if (!/^[0-9a-fA-F]+$/.test(length)) throw errors.INVALID_CHUNK_LENGTH()
+
+    length = parseInt(length, 16)
 
     if (!Number.isInteger(length) || length < 0) {
       throw errors.INVALID_CHUNK_LENGTH()
