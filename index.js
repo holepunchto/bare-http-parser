@@ -189,7 +189,7 @@ module.exports = exports = class HTTPParser {
   }
 
   *_parse() {
-    for (;;) {
+    while (true) {
       if (this._state === BODY) {
         if (this._buffered === 0) return
 
@@ -212,8 +212,7 @@ module.exports = exports = class HTTPParser {
       if (this._state === CHUNK_DATA) {
         if (this._buffered < this._remaining) return
 
-        const all = this._consume(this._remaining)
-        const data = all.subarray(0, this._remaining - 2)
+        const data = this._consume(this._remaining).subarray(0, this._remaining - 2)
 
         this._remaining = 0
         this._state = CHUNK_SIZE
@@ -305,7 +304,7 @@ module.exports = exports = class HTTPParser {
 
             let code = 0
 
-            for (let i = 0; i < this._accumulator.length; i++) {
+            for (let i = 0, n = this._accumulator.length; i < n; i++) {
               code = code * 10 + this._accumulator[i]
             }
 
@@ -470,7 +469,7 @@ module.exports = exports = class HTTPParser {
 
             let length = 0
 
-            for (let i = 0; i < contentLength.length; i++) {
+            for (let i = 0, n = contentLength.length; i < n; i++) {
               const c = contentLength.charCodeAt(i)
 
               if (c < ZERO || c > NINE) throw errors.INVALID_CONTENT_LENGTH()
@@ -508,7 +507,7 @@ module.exports = exports = class HTTPParser {
 
             let length = 0
 
-            for (let i = 0; i < this._accumulator.length; i++) {
+            for (let i = 0, n = this._accumulator.length; i < n; i++) {
               length = length * 16 + this._accumulator[i]
             }
 
