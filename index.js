@@ -282,6 +282,10 @@ module.exports = exports = class HTTPParser {
             this._isResponse = token.startsWith('HTTP/')
 
             if (this._isResponse) {
+              if (token !== 'HTTP/1.0' && token !== 'HTTP/1.1') {
+                throw errors.INVALID_MESSAGE()
+              }
+
               this._version = token
               this._state = STATUS_CODE
             } else {
@@ -339,8 +343,10 @@ module.exports = exports = class HTTPParser {
             }
 
             this._state = FIRST_LINE_LF
-          } else {
+          } else if (byte >= 0x21 && byte !== 0x7f) {
             this._accumulator.push(byte)
+          } else {
+            throw errors.INVALID_MESSAGE()
           }
 
           break
@@ -596,6 +602,8 @@ module.exports = exports = class HTTPParser {
         }
 
         case CHUNK_EXTENSION: {
+          this._checkHeaderSize()
+
           if (byte === CR) {
             if (this._remaining === 0) {
               this._state = LAST_CHUNK_LF

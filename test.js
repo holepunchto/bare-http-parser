@@ -962,6 +962,55 @@ test('response, slash only allowed after HTTP in first token', (t) => {
   t.is(result[0].code, 200)
 })
 
+test('chunked response, chunk extension exceeds header size limit', async (t) => {
+  const parser = new HTTPParser({ maxHeaderSize: 64 })
+
+  const input =
+    'HTTP/1.1 200 OK\r\n' +
+    'Transfer-Encoding: chunked\r\n' +
+    '\r\n' +
+    '5;' +
+    'x'.repeat(100) +
+    '\r\n' +
+    'hello\r\n' +
+    '0\r\n' +
+    '\r\n'
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
+test('response, invalid version rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `HTTP/2.0 200 OK\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
+test('response, HTTP/0.9 rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `HTTP/0.9 200 OK\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
+test('request, control character in version rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from('GET / HTTP/1'),
+    Buffer.from([0x01]),
+    Buffer.from('1\r\n\r\n')
+  ])
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
 test('end, returns empty after full consumption', (t) => {
   const parser = new HTTPParser()
 
