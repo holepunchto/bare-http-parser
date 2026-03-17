@@ -41,11 +41,12 @@ const BODY = 12
 const CHUNK_SIZE = 13
 const CHUNK_SIZE_LF = 14
 const CHUNK_DATA = 15
+const CHUNK_EXTENSION = 16
 
 // Trailing states
-const LAST_CHUNK_LF = 16
-const TRAILER_CR = 17
-const TRAILER_LF = 18
+const LAST_CHUNK_LF = 17
+const TRAILER_CR = 18
+const TRAILER_LF = 19
 
 module.exports = exports = class HTTPParser {
   constructor(opts = {}) {
@@ -197,6 +198,7 @@ module.exports = exports = class HTTPParser {
       case 'prototype':
         throw errors.INVALID_HEADER("Unsafe header name '" + name + "'")
 
+      case 'host':
       case 'content-length':
       case 'transfer-encoding':
         if (name in this._headers) {
@@ -288,7 +290,16 @@ module.exports = exports = class HTTPParser {
             }
           } else if (byte === CR) {
             throw errors.INVALID_MESSAGE()
-          } else if (isTokenByte(byte) || byte === 0x2f) {
+          } else if (isTokenByte(byte)) {
+            this._accumulator.push(byte)
+          } else if (
+            byte === 0x2f &&
+            this._accumulator.length === 4 &&
+            this._accumulator[0] === 0x48 &&
+            this._accumulator[1] === 0x54 &&
+            this._accumulator[2] === 0x54 &&
+            this._accumulator[3] === 0x50
+          ) {
             this._accumulator.push(byte)
           } else {
             throw errors.INVALID_MESSAGE()
@@ -549,7 +560,7 @@ module.exports = exports = class HTTPParser {
         }
 
         case CHUNK_SIZE: {
-          if (byte === CR) {
+          if (byte === CR || byte === 0x3b) {
             if (this._accumulator.length === 0) throw errors.INVALID_CHUNK_LENGTH()
 
             let length = 0
@@ -562,7 +573,10 @@ module.exports = exports = class HTTPParser {
 
             if (!Number.isSafeInteger(length)) throw errors.INVALID_CHUNK_LENGTH()
 
-            if (length === 0) {
+            if (byte === 0x3b) {
+              this._remaining = length
+              this._state = CHUNK_EXTENSION
+            } else if (length === 0) {
               this._state = LAST_CHUNK_LF
             } else {
               this._remaining = length + 2
@@ -575,6 +589,21 @@ module.exports = exports = class HTTPParser {
 
             this._accumulator.push(hexValue(byte))
           } else {
+            throw errors.INVALID_CHUNK_LENGTH()
+          }
+
+          break
+        }
+
+        case CHUNK_EXTENSION: {
+          if (byte === CR) {
+            if (this._remaining === 0) {
+              this._state = LAST_CHUNK_LF
+            } else {
+              this._remaining += 2
+              this._state = CHUNK_SIZE_LF
+            }
+          } else if (!isFieldByte(byte)) {
             throw errors.INVALID_CHUNK_LENGTH()
           }
 

@@ -873,6 +873,95 @@ test('response, control character in reason phrase rejected', async (t) => {
   await t.exception(() => [...parser.push(input)], /INVALID/)
 })
 
+test('request, duplicate host header rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: a.com\r
+Host: b.com\r
+Content-Length: 0\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
+test('chunked response, chunk extension accepted', (t) => {
+  const parser = new HTTPParser()
+
+  const input =
+    'HTTP/1.1 200 OK\r\n' +
+    'Host: example.com\r\n' +
+    'Transfer-Encoding: chunked\r\n' +
+    '\r\n' +
+    '5;name=value\r\n' +
+    'hello\r\n' +
+    '0;final\r\n' +
+    '\r\n'
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].type, RESPONSE)
+  t.is(result[1].type, DATA)
+  t.alike(result[1].data, Buffer.from('hello'))
+  t.is(result[2].type, END)
+})
+
+test('chunked response, chunk extension with quoted value', (t) => {
+  const parser = new HTTPParser()
+
+  const input =
+    'HTTP/1.1 200 OK\r\n' +
+    'Host: example.com\r\n' +
+    'Transfer-Encoding: chunked\r\n' +
+    '\r\n' +
+    '5;name="value"\r\n' +
+    'hello\r\n' +
+    '0\r\n' +
+    '\r\n'
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].type, RESPONSE)
+  t.is(result[1].type, DATA)
+  t.alike(result[1].data, Buffer.from('hello'))
+  t.is(result[2].type, END)
+})
+
+test('chunked response, chunk extension with control character rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from(
+      'HTTP/1.1 200 OK\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5;name='
+    ),
+    Buffer.from([0x00]),
+    Buffer.from('\r\nhello\r\n0\r\n\r\n')
+  ])
+
+  await t.exception(() => [...parser.push(input)], /INVALID_CHUNK_LENGTH/)
+})
+
+test('request, slash in method name rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = 'G/T / HTTP/1.0\r\n\r\n'
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
+test('response, slash only allowed after HTTP in first token', (t) => {
+  const parser = new HTTPParser()
+
+  const input = 'HTTP/1.1 200 OK\r\nHost: example.com\r\n\r\n'
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].type, RESPONSE)
+  t.is(result[0].version, 'HTTP/1.1')
+  t.is(result[0].code, 200)
+})
+
 test('end, returns empty after full consumption', (t) => {
   const parser = new HTTPParser()
 
