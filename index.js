@@ -20,6 +20,8 @@ const LOWER_A = 0x61
 const LOWER_F = 0x66
 const COLON = 0x3a
 
+const MAX_CHUNK_SIZE_LENGTH = 16
+
 // Header states
 const FIRST_TOKEN = 0
 const REQUEST_URL = 1
@@ -181,11 +183,30 @@ module.exports = exports = class HTTPParser {
       throw errors.INVALID_MESSAGE('Header count exceeds limit of ' + this._maxHeadersCount)
     }
 
-    if ((name === 'content-length' || name === 'transfer-encoding') && name in this._headers) {
-      throw errors.INVALID_HEADER("Duplicate header '" + name + "'")
-    }
+    switch (name) {
+      case '__proto__':
+      case 'constructor':
+      case 'prototype':
+        throw errors.INVALID_HEADER("Unsafe header name '" + name + "'")
 
-    this._headers[name] = value
+      case 'content-length':
+      case 'transfer-encoding':
+        if (name in this._headers) {
+          throw errors.INVALID_HEADER("Duplicate header '" + name + "'")
+        }
+
+        this._headers[name] = value
+        break
+
+      default:
+        const delimiter = name === 'cookie' ? '; ' : ', '
+
+        if (name in this._headers) {
+          this._headers[name] += delimiter + value
+        } else {
+          this._headers[name] = value
+        }
+    }
   }
 
   *_parse() {
@@ -212,7 +233,13 @@ module.exports = exports = class HTTPParser {
       if (this._state === CHUNK_DATA) {
         if (this._buffered < this._remaining) return
 
-        const data = this._consume(this._remaining).subarray(0, this._remaining - 2)
+        const consumed = this._consume(this._remaining)
+
+        if (consumed[this._remaining - 2] !== CR || consumed[this._remaining - 1] !== LF) {
+          throw errors.INVALID_MESSAGE('Expected CRLF after chunk data')
+        }
+
+        const data = consumed.subarray(0, this._remaining - 2)
 
         this._remaining = 0
         this._state = CHUNK_SIZE
@@ -451,7 +478,13 @@ module.exports = exports = class HTTPParser {
           const transferEncoding = headers['transfer-encoding']
           const contentLength = headers['content-length']
 
-          if (transferEncoding && transferEncoding.toLowerCase() === 'chunked') {
+          const encodings = transferEncoding ? transferEncoding.split(',') : null
+
+          const lastEncoding = encodings
+            ? encodings[encodings.length - 1].trim().toLowerCase()
+            : null
+
+          if (lastEncoding === 'chunked') {
             if (contentLength) {
               throw errors.INVALID_MESSAGE(
                 "Conflicting 'Content-Length' and 'Transfer-Encoding' headers"
@@ -477,7 +510,7 @@ module.exports = exports = class HTTPParser {
               length = length * 10 + (c - ZERO)
             }
 
-            if (!Number.isInteger(length) || length < 0) {
+            if (!Number.isSafeInteger(length) || length < 0) {
               throw errors.INVALID_CONTENT_LENGTH()
             }
 
@@ -513,6 +546,8 @@ module.exports = exports = class HTTPParser {
 
             this._accumulator = []
 
+            if (!Number.isSafeInteger(length)) throw errors.INVALID_CHUNK_LENGTH()
+
             if (length === 0) {
               this._state = LAST_CHUNK_LF
             } else {
@@ -520,6 +555,10 @@ module.exports = exports = class HTTPParser {
               this._state = CHUNK_SIZE_LF
             }
           } else if (isHex(byte)) {
+            if (this._accumulator.length >= MAX_CHUNK_SIZE_LENGTH) {
+              throw errors.INVALID_CHUNK_LENGTH()
+            }
+
             this._accumulator.push(hexValue(byte))
           } else {
             throw errors.INVALID_CHUNK_LENGTH()
@@ -572,8 +611,19 @@ module.exports = exports = class HTTPParser {
 
 exports.constants = constants
 
+const TOKEN_BYTES = Buffer.from([
+  // 0x00-0x1f (control characters) + 0x20 (space)
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  // 0x21-0x40: ! " # $ % & ' ( ) * + , - . / 0-9 : ; < = > ? @
+  1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1,
+  // 0x41-0x60: A-Z [ \ ] ^ _ `
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1,
+  // 0x61-0x7f: a-z { | } ~ DEL
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0
+])
+
 function isTokenByte(b) {
-  return b >= 0x21 && b <= 0x7e
+  return TOKEN_BYTES[b] === 1
 }
 
 function isFieldByte(b) {

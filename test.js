@@ -599,6 +599,184 @@ test('end, returns body when generator abandoned after header', (t) => {
   t.alike(remaining, Buffer.from('hello world'))
 })
 
+test('request, chunk size exceeds safe integer', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: example.com\r
+Transfer-Encoding: chunked\r
+\r
+fffffffffffffffff\r
+hello\r
+0\r
+\r\n`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_CHUNK_LENGTH/)
+})
+
+test('request, chunk size exceeds max length', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: example.com\r
+Transfer-Encoding: chunked\r
+\r
+${'a'.repeat(17)}\r
+hello\r
+0\r
+\r\n`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_CHUNK_LENGTH/)
+})
+
+test('request, content-length exceeds safe integer', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: example.com\r
+Content-Length: 9007199254740993\r
+\r
+hello`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_CONTENT_LENGTH/)
+})
+
+test('request, chunk data missing CRLF terminator', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from(
+      'POST /users HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n'
+    ),
+    Buffer.from('helloXX'),
+    Buffer.from('0\r\n\r\n')
+  ])
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
+test('request, __proto__ header rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /users HTTP/1.0\r
+__proto__: polluted\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
+test('request, constructor header rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /users HTTP/1.0\r
+constructor: value\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
+test('request, prototype header rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /users HTTP/1.0\r
+prototype: value\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
+test('request, duplicate headers combined with comma', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /users HTTP/1.0\r
+X-Forwarded-For: 1.1.1.1\r
+X-Forwarded-For: 2.2.2.2\r
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].type, REQUEST)
+  t.is(result[0].headers['x-forwarded-for'], '1.1.1.1, 2.2.2.2')
+})
+
+test('request, stacked transfer-encoding with chunked last', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: example.com\r
+Transfer-Encoding: gzip, chunked\r
+\r
+5\r
+hello\r
+0\r
+\r\n`
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].type, REQUEST)
+  t.is(result[1].type, DATA)
+  t.alike(result[1].data, Buffer.from('hello'))
+  t.is(result[2].type, END)
+})
+
+test('request, stacked transfer-encoding without chunked last', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: example.com\r
+Transfer-Encoding: chunked, gzip\r
+Content-Length: 5\r
+\r
+hello`
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].type, REQUEST)
+  t.is(result[1].type, DATA)
+  t.alike(result[1].data, Buffer.from('hello'))
+  t.is(result[2].type, END)
+})
+
+test('request, separator chars rejected in header name', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /users HTTP/1.1\r
+Host: example.com\r
+X[Bad]: value\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
+test('request, parentheses rejected in header name', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /users HTTP/1.1\r
+Host: example.com\r
+X(Bad): value\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
+test('request, at-sign rejected in header name', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /users HTTP/1.1\r
+Host: example.com\r
+X@Bad: value\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
 test('end, returns empty after full consumption', (t) => {
   const parser = new HTTPParser()
 
