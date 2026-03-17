@@ -17,8 +17,12 @@ const constants = {
 }
 
 module.exports = exports = class HTTPParser {
-  constructor() {
+  constructor(opts = {}) {
+    const { maxHeaderSize = 16384, maxHeadersCount = 2000 } = opts
+
     this._state = BEFORE_HEAD
+    this._maxHeaderSize = maxHeaderSize
+    this._maxHeadersCount = maxHeadersCount
     this._buffer = []
     this._buffered = 0
     this._remaining = -1
@@ -101,6 +105,10 @@ module.exports = exports = class HTTPParser {
   }
 
   *_onbeforehead() {
+    if (this._buffered > this._maxHeaderSize) {
+      throw errors.INVALID_MESSAGE(`Header exceeds limit of ${this._maxHeaderSize} bytes`)
+    }
+
     const i = this._findSequence(TERMINATOR)
     if (i < 0) return false
 
@@ -110,6 +118,10 @@ module.exports = exports = class HTTPParser {
 
     if (lines.length === 0) throw errors.INVALID_MESSAGE()
 
+    if (lines.length >= this._maxHeadersCount) {
+      throw errors.INVALID_MESSAGE(`Header count exceeds limit of ${this._maxHeadersCount}`)
+    }
+
     const headers = {}
 
     for (let i = 1, n = lines.length; i < n; i++) {
@@ -117,7 +129,15 @@ module.exports = exports = class HTTPParser {
 
       if (name === null) throw errors.INVALID_HEADER()
 
-      headers[name.toLowerCase()] = value
+      if (!/^[\x21-\x7e]+$/.test(name)) throw errors.INVALID_HEADER()
+
+      const key = name.toLowerCase()
+
+      if ((key === 'content-length' || key === 'transfer-encoding') && key in headers) {
+        throw errors.INVALID_HEADER(`Duplicate header '${name}'`)
+      }
+
+      headers[key] = value
     }
 
     if (lines[0].startsWith('HTTP/')) {
@@ -146,12 +166,16 @@ module.exports = exports = class HTTPParser {
       }
     }
 
-    if (headers['transfer-encoding'] === 'chunked') {
+    if (headers['transfer-encoding'] && headers['transfer-encoding'].toLowerCase() === 'chunked') {
+      if (headers['content-length']) {
+        throw errors.INVALID_MESSAGE(`Conflicting 'Content-Length' and 'Transfer-Encoding' headers`)
+      }
+
       this._state = BEFORE_CHUNK
     } else if (headers['content-length']) {
-      const length = parseInt(headers['content-length'], 10)
+      const length = Number(headers['content-length'])
 
-      if (Number.isNaN(length) || length < 0) {
+      if (!Number.isInteger(length) || length < 0) {
         throw errors.INVALID_CONTENT_LENGTH()
       }
 
@@ -198,9 +222,9 @@ module.exports = exports = class HTTPParser {
 
     const data = this._consume(i).subarray(0, i - DELIMITER.length)
 
-    const length = parseInt(data.toString(), 16)
+    const length = Number('0x' + data.toString())
 
-    if (Number.isNaN(length) || length < 0) {
+    if (!Number.isInteger(length) || length < 0) {
       throw errors.INVALID_CHUNK_LENGTH()
     }
 
@@ -247,9 +271,9 @@ module.exports = exports = class HTTPParser {
 exports.constants = constants
 
 function splitHeader(header) {
-  const i = header.indexOf(': ')
+  const i = header.indexOf(':')
 
   if (i === -1) return [null, null]
 
-  return [header.slice(0, i), header.slice(i + 2)]
+  return [header.slice(0, i), header.slice(i + 1).trimStart()]
 }
