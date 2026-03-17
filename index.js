@@ -1,14 +1,5 @@
 const errors = require('./lib/errors')
 
-const DELIMITER = Buffer.from('\r\n')
-const TERMINATOR = Buffer.from('\r\n\r\n')
-
-const BEFORE_HEAD = 1
-const BODY = 2
-const BEFORE_CHUNK = 3
-const CHUNK = 4
-const AFTER_LAST_CHUNK = 5
-
 const constants = {
   REQUEST: 1,
   RESPONSE: 2,
@@ -16,293 +7,516 @@ const constants = {
   END: 4
 }
 
+const TAB = 0x09
+const LF = 0x0a
+const CR = 0x0d
+const SP = 0x20
+const ZERO = 0x30
+const NINE = 0x39
+const UPPER_A = 0x41
+const UPPER_F = 0x46
+const UPPER_Z = 0x5a
+const LOWER_A = 0x61
+const LOWER_F = 0x66
+const COLON = 0x3a
+
+// Header states
+const FIRST_TOKEN = 0
+const REQUEST_URL = 1
+const REQUEST_VERSION = 2
+const STATUS_CODE = 3
+const STATUS_REASON = 4
+const FIRST_LINE_LF = 5
+const HEADER_START = 6
+const HEADER_NAME = 7
+const HEADER_VALUE_WS = 8
+const HEADER_VALUE = 9
+const HEADER_LINE_LF = 10
+const HEADER_END_LF = 11
+
+// Body states
+const BODY = 12
+const CHUNK_SIZE = 13
+const CHUNK_SIZE_LF = 14
+const CHUNK_DATA = 15
+
+// Trailing states
+const LAST_CHUNK_LF = 16
+const TRAILER_CR = 17
+const TRAILER_LF = 18
+
 module.exports = exports = class HTTPParser {
   constructor(opts = {}) {
     const { maxHeaderSize = 16384, maxHeadersCount = 2000 } = opts
 
-    this._state = BEFORE_HEAD
     this._maxHeaderSize = maxHeaderSize
     this._maxHeadersCount = maxHeadersCount
-    this._buffer = []
-    this._buffered = 0
-    this._remaining = -1
-    this._bufferIndex = 0
-    this._byteIndex = 0
-    this._position = 0
-    this._hits = 0
+    this._state = FIRST_TOKEN
+    this._buffer = Buffer.alloc(0)
+    this._i = 0
+    this._accumulator = []
+
+    this._isResponse = false
+    this._method = ''
+    this._url = ''
+    this._version = ''
+    this._code = 0
+    this._reason = ''
+
+    this._headerName = ''
+    this._headers = {}
+    this._headerCount = 0
+    this._headerSize = 0
+
+    this._remaining = 0
   }
 
   *push(data, encoding) {
     if (typeof data === 'string') data = Buffer.from(data, encoding)
 
-    this._buffer.push(data)
-    this._buffered += data.byteLength
+    this._buffer = this._buffer.length > 0 ? Buffer.concat([this._buffer, data]) : data
+    this._i = 0
 
-    while (this._buffered > 0) {
-      switch (this._state) {
-        case BEFORE_HEAD:
-          if (yield* this._onbeforehead()) continue
-          else return
+    yield* this._parse()
 
-        case BODY:
-          if (yield* this._onbody()) continue
-          else return
-
-        case BEFORE_CHUNK:
-          if (yield* this._onbeforechunk()) continue
-          else return
-
-        case CHUNK:
-          if (yield* this._onchunk()) continue
-          else return
-
-        case AFTER_LAST_CHUNK:
-          if (yield* this._onafterlastchunk()) continue
-          else return
-      }
-    }
+    this._buffer = this._i < this._buffer.length ? this._buffer.subarray(this._i) : Buffer.alloc(0)
+    this._i = 0
   }
 
   end() {
-    return this._consume(this._buffered)
+    const remaining = this._buffer.subarray(this._i)
+
+    this._buffer = Buffer.alloc(0)
+    this._i = 0
+
+    return remaining
   }
 
-  _findSequence(sequence) {
-    for (; this._bufferIndex < this._buffer.length; this._bufferIndex++) {
-      const data = this._buffer[this._bufferIndex]
+  _buildString() {
+    const string = String.fromCharCode.apply(null, this._accumulator)
 
-      for (; this._byteIndex < data.byteLength; this._byteIndex++, this._position++) {
-        if (data[this._byteIndex] === sequence[this._hits]) {
-          this._hits++
+    this._accumulator = []
 
-          if (this._hits === sequence.length) {
-            const position = this._position + 1
+    return string
+  }
 
-            this._bufferIndex = 0
-            this._byteIndex = 0
-            this._position = 0
-            this._hits = 0
-            return position
+  _checkHeaderSize() {
+    if (++this._headerSize > this._maxHeaderSize) {
+      throw errors.INVALID_MESSAGE('Header exceeds limit of ' + this._maxHeaderSize + ' bytes')
+    }
+  }
+
+  _storeHeader(name, value) {
+    this._headerCount++
+
+    if (this._headerCount + 1 >= this._maxHeadersCount) {
+      throw errors.INVALID_MESSAGE('Header count exceeds limit of ' + this._maxHeadersCount)
+    }
+
+    if ((name === 'content-length' || name === 'transfer-encoding') && name in this._headers) {
+      throw errors.INVALID_HEADER("Duplicate header '" + name + "'")
+    }
+
+    this._headers[name] = value
+  }
+
+  *_parse() {
+    const buffer = this._buffer
+
+    for (;;) {
+      if (this._state === BODY) {
+        if (this._i >= buffer.length) return
+
+        const available = Math.min(buffer.length - this._i, this._remaining)
+        const data = buffer.subarray(this._i, this._i + available)
+
+        this._i += available
+        this._remaining -= available
+
+        const ended = this._remaining === 0
+
+        if (ended) this._state = FIRST_TOKEN
+
+        yield { type: constants.DATA, data }
+
+        if (ended) yield { type: constants.END }
+
+        continue
+      }
+
+      if (this._state === CHUNK_DATA) {
+        if (buffer.length - this._i < this._remaining) return
+
+        const data = buffer.subarray(this._i, this._i + this._remaining - 2)
+
+        this._i += this._remaining
+        this._remaining = 0
+        this._state = CHUNK_SIZE
+
+        yield { type: constants.DATA, data }
+
+        continue
+      }
+
+      if (this._i >= buffer.length) return
+
+      const byte = buffer[this._i++]
+
+      switch (this._state) {
+        case FIRST_TOKEN: {
+          this._checkHeaderSize()
+
+          if (byte === SP) {
+            const token = this._buildString()
+
+            if (token.length === 0) throw errors.INVALID_MESSAGE()
+
+            this._isResponse = token.startsWith('HTTP/')
+
+            if (this._isResponse) {
+              this._version = token
+              this._state = STATUS_CODE
+            } else {
+              this._method = token
+              this._state = REQUEST_URL
+            }
+          } else if (byte === CR) {
+            throw errors.INVALID_MESSAGE()
+          } else {
+            this._accumulator.push(byte)
           }
-        } else {
-          this._hits = data[this._byteIndex] === sequence[0] ? 1 : 0
+
+          break
         }
+
+        case REQUEST_URL: {
+          this._checkHeaderSize()
+
+          if (byte === SP) {
+            this._url = this._buildString()
+
+            if (this._url.length === 0) throw errors.INVALID_MESSAGE()
+
+            this._state = REQUEST_VERSION
+          } else if (byte === CR) {
+            throw errors.INVALID_MESSAGE()
+          } else {
+            this._accumulator.push(byte)
+          }
+
+          break
+        }
+
+        case REQUEST_VERSION: {
+          this._checkHeaderSize()
+
+          if (byte === CR) {
+            this._version = this._buildString()
+
+            if (this._version !== 'HTTP/1.0' && this._version !== 'HTTP/1.1') {
+              throw errors.INVALID_MESSAGE()
+            }
+
+            this._state = FIRST_LINE_LF
+          } else {
+            this._accumulator.push(byte)
+          }
+
+          break
+        }
+
+        case STATUS_CODE: {
+          this._checkHeaderSize()
+
+          if (byte === SP) {
+            if (this._accumulator.length === 0) throw errors.INVALID_MESSAGE()
+
+            let code = 0
+
+            for (let i = 0; i < this._accumulator.length; i++) {
+              code = code * 10 + this._accumulator[i]
+            }
+
+            this._accumulator = []
+
+            if (code < 100 || code > 999) throw errors.INVALID_MESSAGE()
+
+            this._code = code
+            this._state = STATUS_REASON
+          } else if (byte >= ZERO && byte <= NINE) {
+            this._accumulator.push(byte - ZERO)
+          } else {
+            throw errors.INVALID_MESSAGE()
+          }
+
+          break
+        }
+
+        case STATUS_REASON: {
+          this._checkHeaderSize()
+
+          if (byte === CR) {
+            this._reason = this._buildString()
+            this._state = FIRST_LINE_LF
+          } else {
+            this._accumulator.push(byte)
+          }
+
+          break
+        }
+
+        case FIRST_LINE_LF: {
+          if (byte !== LF) throw errors.INVALID_MESSAGE()
+
+          this._headers = {}
+          this._headerCount = 0
+          this._state = HEADER_START
+
+          break
+        }
+
+        case HEADER_START: {
+          this._checkHeaderSize()
+
+          if (byte === CR) {
+            this._state = HEADER_END_LF
+          } else if (byte !== COLON && isTokenByte(byte)) {
+            this._accumulator.push(byte >= UPPER_A && byte <= UPPER_Z ? byte + 0x20 : byte)
+            this._state = HEADER_NAME
+          } else {
+            throw errors.INVALID_HEADER()
+          }
+
+          break
+        }
+
+        case HEADER_NAME: {
+          this._checkHeaderSize()
+
+          if (byte === COLON) {
+            this._headerName = this._buildString()
+            this._state = HEADER_VALUE_WS
+          } else if (byte !== COLON && isTokenByte(byte)) {
+            this._accumulator.push(byte >= UPPER_A && byte <= UPPER_Z ? byte + 0x20 : byte)
+          } else {
+            throw errors.INVALID_HEADER()
+          }
+
+          break
+        }
+
+        case HEADER_VALUE_WS: {
+          this._checkHeaderSize()
+
+          if (byte === SP || byte === TAB) break
+
+          if (byte === CR) {
+            this._storeHeader(this._headerName, '')
+            this._headerName = ''
+            this._state = HEADER_LINE_LF
+
+            break
+          }
+
+          if (!isFieldByte(byte)) throw errors.INVALID_HEADER()
+
+          this._accumulator.push(byte)
+          this._state = HEADER_VALUE
+
+          break
+        }
+
+        case HEADER_VALUE: {
+          this._checkHeaderSize()
+
+          if (byte === CR) {
+            this._storeHeader(this._headerName, this._buildString())
+            this._headerName = ''
+            this._state = HEADER_LINE_LF
+          } else if (isFieldByte(byte)) {
+            this._accumulator.push(byte)
+          } else {
+            throw errors.INVALID_HEADER()
+          }
+
+          break
+        }
+
+        case HEADER_LINE_LF: {
+          if (byte !== LF) throw errors.INVALID_HEADER()
+
+          this._state = HEADER_START
+
+          break
+        }
+
+        case HEADER_END_LF: {
+          if (byte !== LF) throw errors.INVALID_MESSAGE()
+
+          const headers = this._headers
+
+          if (this._isResponse) {
+            yield {
+              type: constants.RESPONSE,
+              version: this._version,
+              code: this._code,
+              reason: this._reason,
+              headers
+            }
+          } else {
+            if (this._version === 'HTTP/1.1' && !('host' in headers)) {
+              throw errors.INVALID_HEADER("Header 'Host' is missing")
+            }
+
+            yield {
+              type: constants.REQUEST,
+              version: this._version,
+              method: this._method,
+              url: this._url,
+              headers
+            }
+          }
+
+          const transferEncoding = headers['transfer-encoding']
+          const contentLength = headers['content-length']
+
+          if (transferEncoding && transferEncoding.toLowerCase() === 'chunked') {
+            if (contentLength) {
+              throw errors.INVALID_MESSAGE(
+                "Conflicting 'Content-Length' and 'Transfer-Encoding' headers"
+              )
+            }
+
+            this._state = CHUNK_SIZE
+            this._headerSize = 0
+
+            continue
+          }
+
+          if (contentLength) {
+            if (contentLength.length === 0) throw errors.INVALID_CONTENT_LENGTH()
+
+            let length = 0
+
+            for (let i = 0; i < contentLength.length; i++) {
+              const c = contentLength.charCodeAt(i)
+
+              if (c < ZERO || c > NINE) throw errors.INVALID_CONTENT_LENGTH()
+
+              length = length * 10 + (c - ZERO)
+            }
+
+            if (!Number.isInteger(length) || length < 0) {
+              throw errors.INVALID_CONTENT_LENGTH()
+            }
+
+            if (length === 0) {
+              this._state = FIRST_TOKEN
+              this._headerSize = 0
+
+              yield { type: constants.END }
+            } else {
+              this._state = BODY
+              this._remaining = length
+              this._headerSize = 0
+            }
+          } else {
+            this._state = FIRST_TOKEN
+            this._headerSize = 0
+
+            yield { type: constants.END }
+          }
+
+          break
+        }
+
+        case CHUNK_SIZE: {
+          if (byte === CR) {
+            if (this._accumulator.length === 0) throw errors.INVALID_CHUNK_LENGTH()
+
+            let length = 0
+
+            for (let i = 0; i < this._accumulator.length; i++) {
+              length = length * 16 + this._accumulator[i]
+            }
+
+            this._accumulator = []
+
+            if (length === 0) {
+              this._state = LAST_CHUNK_LF
+            } else {
+              this._remaining = length + 2
+              this._state = CHUNK_SIZE_LF
+            }
+          } else if (isHex(byte)) {
+            this._accumulator.push(hexValue(byte))
+          } else {
+            throw errors.INVALID_CHUNK_LENGTH()
+          }
+
+          break
+        }
+
+        case CHUNK_SIZE_LF: {
+          if (byte !== LF) throw errors.INVALID_CHUNK_LENGTH()
+
+          this._state = CHUNK_DATA
+
+          break
+        }
+
+        case LAST_CHUNK_LF: {
+          if (byte !== LF) throw errors.INVALID_CHUNK_LENGTH()
+
+          this._state = TRAILER_CR
+
+          break
+        }
+
+        case TRAILER_CR: {
+          if (byte !== CR) throw errors.INVALID_MESSAGE()
+
+          this._state = TRAILER_LF
+
+          break
+        }
+
+        case TRAILER_LF: {
+          if (byte !== LF) throw errors.INVALID_MESSAGE()
+
+          this._state = FIRST_TOKEN
+          this._headerSize = 0
+
+          yield { type: constants.END }
+
+          break
+        }
+
+        default:
+          throw errors.INVALID_MESSAGE()
       }
-
-      this._byteIndex = 0
     }
-
-    return -1
-  }
-
-  _consume(n) {
-    const buffer = this._buffer.length === 1 ? this._buffer[0] : Buffer.concat(this._buffer)
-
-    this._buffered -= n
-    this._buffer = this._buffered > 0 ? [buffer.subarray(n)] : []
-
-    return buffer.subarray(0, n)
-  }
-
-  *_onbeforehead() {
-    if (this._buffered > this._maxHeaderSize) {
-      throw errors.INVALID_MESSAGE(`Header exceeds limit of ${this._maxHeaderSize} bytes`)
-    }
-
-    const i = this._findSequence(TERMINATOR)
-    if (i < 0) return false
-
-    const data = this._consume(i).subarray(0, i - TERMINATOR.byteLength)
-
-    const lines = data.toString('latin1').split('\r\n')
-
-    if (lines.length === 0) throw errors.INVALID_MESSAGE()
-
-    if (lines.length >= this._maxHeadersCount) {
-      throw errors.INVALID_MESSAGE(`Header count exceeds limit of ${this._maxHeadersCount}`)
-    }
-
-    const headers = {}
-
-    for (let i = 1, n = lines.length; i < n; i++) {
-      const [name, value] = splitHeader(lines[i])
-
-      if (name === null) throw errors.INVALID_HEADER()
-
-      if (!/^[\x21-\x7e]+$/.test(name)) throw errors.INVALID_HEADER()
-      if (!/^[\x09\x20-\x7e]*$/.test(value)) throw errors.INVALID_HEADER()
-
-      const key = name.toLowerCase()
-
-      if ((key === 'content-length' || key === 'transfer-encoding') && key in headers) {
-        throw errors.INVALID_HEADER(`Duplicate header '${name}'`)
-      }
-
-      headers[key] = value
-    }
-
-    if (lines[0].startsWith('HTTP/')) {
-      let [version = null, code = null, ...reason] = lines[0].split(' ')
-
-      if (version === null) throw errors.INVALID_MESSAGE()
-
-      if (code === null) throw errors.INVALID_MESSAGE()
-
-      if (!/^[0-9]+$/.test(code)) throw errors.INVALID_MESSAGE()
-
-      code = parseInt(code, 10)
-
-      if (!Number.isInteger(code) || code < 100 || code > 999) {
-        throw errors.INVALID_MESSAGE()
-      }
-
-      yield {
-        type: constants.RESPONSE,
-        version,
-        code,
-        reason: reason.join(' '),
-        headers
-      }
-    } else {
-      const [method = null, url = null, version = null] = lines[0].split(' ')
-
-      if (method === null) throw errors.INVALID_MESSAGE()
-
-      if (url === null) throw errors.INVALID_MESSAGE()
-
-      if (version === null) throw errors.INVALID_MESSAGE()
-
-      if (version !== 'HTTP/1.0' && version !== 'HTTP/1.1') throw errors.INVALID_MESSAGE()
-
-      if (version === 'HTTP/1.1' && 'host' in headers === false) {
-        throw errors.INVALID_HEADER(`Header 'Host' is missing`)
-      }
-
-      yield {
-        type: constants.REQUEST,
-        version,
-        method,
-        url,
-        headers
-      }
-    }
-
-    if (headers['transfer-encoding'] && headers['transfer-encoding'].toLowerCase() === 'chunked') {
-      if (headers['content-length']) {
-        throw errors.INVALID_MESSAGE(`Conflicting 'Content-Length' and 'Transfer-Encoding' headers`)
-      }
-
-      this._state = BEFORE_CHUNK
-    } else if (headers['content-length']) {
-      let length = headers['content-length']
-
-      if (!/^[0-9]+$/.test(length)) throw errors.INVALID_CONTENT_LENGTH()
-
-      length = parseInt(length, 10)
-
-      if (!Number.isInteger(length) || length < 0) {
-        throw errors.INVALID_CONTENT_LENGTH()
-      }
-
-      if (length === 0) {
-        yield { type: constants.END }
-      } else {
-        this._state = BODY
-        this._remaining = length
-      }
-    } else {
-      yield { type: constants.END }
-    }
-
-    return true
-  }
-
-  *_onbody() {
-    const available = Math.min(this._buffered, this._remaining)
-
-    this._remaining -= available
-
-    const ended = this._remaining === 0
-
-    const data = this._consume(available)
-
-    if (ended) {
-      this._state = BEFORE_HEAD
-      this._remaining = -1
-    }
-
-    yield {
-      type: constants.DATA,
-      data
-    }
-
-    if (ended) yield { type: constants.END }
-
-    return true
-  }
-
-  *_onbeforechunk() {
-    const i = this._findSequence(DELIMITER)
-    if (i < 0) return false
-
-    const data = this._consume(i).subarray(0, i - DELIMITER.length)
-
-    let length = data.toString()
-
-    if (!/^[0-9a-fA-F]+$/.test(length)) throw errors.INVALID_CHUNK_LENGTH()
-
-    length = parseInt(length, 16)
-
-    if (!Number.isInteger(length) || length < 0) {
-      throw errors.INVALID_CHUNK_LENGTH()
-    }
-
-    if (length === 0) {
-      this._state = AFTER_LAST_CHUNK
-    } else {
-      this._state = CHUNK
-      this._remaining = length + DELIMITER.byteLength
-    }
-
-    return true
-  }
-
-  *_onchunk() {
-    if (this._buffered < this._remaining) return false
-
-    const data = this._consume(this._remaining).subarray(0, this._remaining - DELIMITER.byteLength)
-
-    this._state = BEFORE_CHUNK
-    this._remaining = -1
-
-    yield {
-      type: constants.DATA,
-      data
-    }
-
-    return true
-  }
-
-  *_onafterlastchunk() {
-    const i = this._findSequence(DELIMITER)
-    if (i < 0) return false
-
-    this._consume(i)
-
-    this._state = BEFORE_HEAD
-
-    yield { type: constants.END }
-
-    return true
   }
 }
 
 exports.constants = constants
 
-function splitHeader(header) {
-  const i = header.indexOf(':')
+function isTokenByte(b) {
+  return b >= 0x21 && b <= 0x7e
+}
 
-  if (i === -1) return [null, null]
+function isFieldByte(b) {
+  return b === TAB || (b >= 0x20 && b <= 0x7e)
+}
 
-  return [header.slice(0, i), header.slice(i + 1).trimStart()]
+function isHex(b) {
+  return (
+    (b >= ZERO && b <= NINE) || (b >= UPPER_A && b <= UPPER_F) || (b >= LOWER_A && b <= LOWER_F)
+  )
+}
+
+function hexValue(b) {
+  if (b >= ZERO && b <= NINE) return b - ZERO
+  if (b >= UPPER_A && b <= UPPER_F) return b - UPPER_A + 10
+  return b - LOWER_A + 10
 }
