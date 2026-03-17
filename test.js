@@ -260,12 +260,12 @@ hello\r
 0\r
 \r\n`
 
-  const results = [...parser.push(input)]
+  const result = [...parser.push(input)]
 
-  t.is(results[0].type, REQUEST)
-  t.is(results[1].type, DATA)
-  t.alike(results[1].data, Buffer.from('hello'))
-  t.is(results[2].type, END)
+  t.is(result[0].type, REQUEST)
+  t.is(result[1].type, DATA)
+  t.alike(result[1].data, Buffer.from('hello'))
+  t.is(result[2].type, END)
 })
 
 test('request, header exceeds max size', async (t) => {
@@ -356,10 +356,10 @@ Content-Length: 0\r
 \r
 `
 
-  const results = [...parser.push(input)]
+  const result = [...parser.push(input)]
 
-  t.is(results[0].type, REQUEST)
-  t.is(results[0].headers.host, 'example.com')
+  t.is(result[0].type, REQUEST)
+  t.is(result[0].headers.host, 'example.com')
 })
 
 test('request, content-length with trailing garbage', async (t) => {
@@ -396,45 +396,45 @@ test('request, terminator split across pushes', (t) => {
   for (let i = 1; i < terminator.length; i++) {
     const parser = new HTTPParser()
 
-    const results = [
+    const result = [
       ...parser.push(Buffer.from(head + terminator.slice(0, i))),
       ...parser.push(Buffer.from(terminator.slice(i)))
     ]
 
-    t.is(results[0].type, REQUEST)
-    t.is(results[0].headers['x-foo'], 'bar')
+    t.is(result[0].type, REQUEST)
+    t.is(result[0].headers['x-foo'], 'bar')
   }
 })
 
 test('request, partial terminator match resets across pushes', (t) => {
   const parser = new HTTPParser()
 
-  const results = [
+  const result = [
     ...parser.push(Buffer.from('GET / HTTP/1.0\r\n')),
     ...parser.push(Buffer.from('X-Foo: bar\r\n')),
     ...parser.push(Buffer.from('\r\n'))
   ]
 
-  t.is(results[0].type, REQUEST)
-  t.is(results[0].headers['x-foo'], 'bar')
+  t.is(result[0].type, REQUEST)
+  t.is(result[0].headers['x-foo'], 'bar')
 })
 
 test('request, header size exceeded across multiple pushes', async (t) => {
   const parser = new HTTPParser({ maxHeaderSize: 64 })
 
-  const results = []
+  const result = []
 
   for (const msg of parser.push(Buffer.from('GET / HTTP/1.0\r\n'))) {
-    results.push(msg)
+    result.push(msg)
   }
 
   for (const msg of parser.push(Buffer.from('X-A: value\r\n'))) {
-    results.push(msg)
+    result.push(msg)
   }
 
   await t.exception(() => {
     for (const msg of parser.push(Buffer.from('X-Pad: ' + 'A'.repeat(30) + '\r\n\r\n'))) {
-      results.push(msg)
+      result.push(msg)
     }
   }, /INVALID/)
 })
@@ -540,17 +540,75 @@ test('request, byte by byte', (t) => {
     'POST /users HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello'
   )
 
-  const results = []
+  const result = []
+
   for (let i = 0; i < input.byteLength; i++) {
     for (const msg of parser.push(input.subarray(i, i + 1))) {
-      results.push(msg)
+      result.push(msg)
     }
   }
 
-  t.is(results[0].type, REQUEST)
-  t.is(results[0].method, 'POST')
-  t.is(results[results.length - 1].type, END)
+  t.is(result[0].type, REQUEST)
+  t.is(result[0].method, 'POST')
+  t.is(result[result.length - 1].type, END)
 
-  const body = Buffer.concat(results.filter((m) => m.type === DATA).map((m) => m.data))
+  const body = Buffer.concat(result.filter((m) => m.type === DATA).map((m) => m.data))
   t.alike(body, Buffer.from('hello'))
+})
+
+test('end, returns remaining after upgrade', (t) => {
+  const parser = new HTTPParser()
+
+  const input =
+    'GET /chat HTTP/1.1\r\n' +
+    'Host: example.com\r\n' +
+    'Upgrade: websocket\r\n' +
+    'Connection: Upgrade\r\n' +
+    '\r\n' +
+    'websocket-frame-data-here'
+
+  const it = parser.push(input)
+
+  const header = it.next()
+  t.is(header.value.type, REQUEST)
+  t.is(header.value.headers.upgrade, 'websocket')
+
+  const end = it.next()
+  t.is(end.value.type, END)
+
+  const remaining = parser.end()
+  t.alike(remaining, Buffer.from('websocket-frame-data-here'))
+})
+
+test('end, returns body when generator abandoned after header', (t) => {
+  const parser = new HTTPParser()
+
+  const input =
+    'POST /upload HTTP/1.1\r\n' +
+    'Host: example.com\r\n' +
+    'Content-Length: 11\r\n' +
+    '\r\n' +
+    'hello world'
+
+  const it = parser.push(input)
+
+  const header = it.next()
+  t.is(header.value.type, REQUEST)
+
+  const remaining = parser.end()
+  t.alike(remaining, Buffer.from('hello world'))
+})
+
+test('end, returns empty after full consumption', (t) => {
+  const parser = new HTTPParser()
+
+  const input = 'GET / HTTP/1.0\r\n\r\n'
+  const result = [...parser.push(input)]
+
+  t.is(result.length, 2)
+  t.is(result[0].type, REQUEST)
+  t.is(result[1].type, END)
+
+  const remaining = parser.end()
+  t.alike(remaining, Buffer.alloc(0))
 })
