@@ -177,9 +177,17 @@ module.exports = exports = class HTTPParser {
   }
 
   _storeHeader(name, value) {
+    let end = value.length
+
+    while (end > 0 && (value.charCodeAt(end - 1) === SP || value.charCodeAt(end - 1) === TAB)) {
+      end--
+    }
+
+    if (end < value.length) value = value.substring(0, end)
+
     this._headerCount++
 
-    if (this._headerCount + 1 >= this._maxHeadersCount) {
+    if (this._headerCount > this._maxHeadersCount) {
       throw errors.INVALID_MESSAGE('Header count exceeds limit of ' + this._maxHeadersCount)
     }
 
@@ -280,8 +288,10 @@ module.exports = exports = class HTTPParser {
             }
           } else if (byte === CR) {
             throw errors.INVALID_MESSAGE()
-          } else {
+          } else if (isTokenByte(byte) || byte === 0x2f) {
             this._accumulator.push(byte)
+          } else {
+            throw errors.INVALID_MESSAGE()
           }
 
           break
@@ -298,8 +308,10 @@ module.exports = exports = class HTTPParser {
             this._state = REQUEST_VERSION
           } else if (byte === CR) {
             throw errors.INVALID_MESSAGE()
-          } else {
+          } else if (byte >= 0x21 && byte !== 0x7f) {
             this._accumulator.push(byte)
+          } else {
+            throw errors.INVALID_MESSAGE()
           }
 
           break
@@ -356,8 +368,10 @@ module.exports = exports = class HTTPParser {
           if (byte === CR) {
             this._reason = this._buildString()
             this._state = FIRST_LINE_LF
-          } else {
+          } else if (isFieldByte(byte)) {
             this._accumulator.push(byte)
+          } else {
+            throw errors.INVALID_MESSAGE()
           }
 
           break

@@ -777,6 +777,102 @@ X@Bad: value\r
   await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
 })
 
+test('request, max headers count boundary', (t) => {
+  const parser = new HTTPParser({ maxHeadersCount: 3 })
+
+  const input = `GET /users HTTP/1.0\r
+X-A: 1\r
+X-B: 2\r
+X-C: 3\r
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].type, REQUEST)
+  t.is(result[0].headers['x-a'], '1')
+  t.is(result[0].headers['x-b'], '2')
+  t.is(result[0].headers['x-c'], '3')
+})
+
+test('request, max headers count exceeded by one', async (t) => {
+  const parser = new HTTPParser({ maxHeadersCount: 3 })
+
+  const input = `GET /users HTTP/1.0\r
+X-A: 1\r
+X-B: 2\r
+X-C: 3\r
+X-D: 4\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
+test('request, header value trailing whitespace trimmed', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /users HTTP/1.0\r
+X-Foo: bar   \r
+X-Tab: baz\t\t\r
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].type, REQUEST)
+  t.is(result[0].headers['x-foo'], 'bar')
+  t.is(result[0].headers['x-tab'], 'baz')
+})
+
+test('request, control character in method rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from('GE'),
+    Buffer.from([0x01]),
+    Buffer.from('T / HTTP/1.0\r\n\r\n')
+  ])
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
+test('request, null byte in url rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from('GET /us'),
+    Buffer.from([0x00]),
+    Buffer.from('ers HTTP/1.0\r\n\r\n')
+  ])
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
+test('request, control character in url rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from('GET /us'),
+    Buffer.from([0x01]),
+    Buffer.from('ers HTTP/1.0\r\n\r\n')
+  ])
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
+test('response, control character in reason phrase rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from('HTTP/1.1 200 O'),
+    Buffer.from([0x00]),
+    Buffer.from('K\r\n\r\n')
+  ])
+
+  await t.exception(() => [...parser.push(input)], /INVALID/)
+})
+
 test('end, returns empty after full consumption', (t) => {
   const parser = new HTTPParser()
 
