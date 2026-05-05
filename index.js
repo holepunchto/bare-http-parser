@@ -208,7 +208,7 @@ module.exports = exports = class HTTPParser {
         this._headers[name] = value
         break
 
-      default:
+      default: {
         const delimiter = name === 'cookie' ? '; ' : ', '
 
         if (name in this._headers) {
@@ -216,6 +216,7 @@ module.exports = exports = class HTTPParser {
         } else {
           this._headers[name] = value
         }
+      }
     }
   }
 
