@@ -509,13 +509,27 @@ module.exports = exports = class HTTPParser {
           const transferEncoding = headers['transfer-encoding']
           const contentLength = headers['content-length']
 
-          const encodings = transferEncoding ? transferEncoding.split(',') : null
+          if (transferEncoding) {
+            const encodings = transferEncoding.split(',')
 
-          const lastEncoding = encodings
-            ? encodings[encodings.length - 1].trim().toLowerCase()
-            : null
+            let chunkedCount = 0
 
-          if (lastEncoding === 'chunked') {
+            for (let i = 0, n = encodings.length; i < n; i++) {
+              if (encodings[i].trim().toLowerCase() === 'chunked') chunkedCount++
+            }
+
+            const lastEncoding = encodings[encodings.length - 1].trim().toLowerCase()
+
+            if (lastEncoding !== 'chunked') {
+              throw errors.INVALID_MESSAGE("'Transfer-Encoding' must end with 'chunked'")
+            }
+
+            if (chunkedCount > 1) {
+              throw errors.INVALID_MESSAGE(
+                "'chunked' must not appear more than once in 'Transfer-Encoding'"
+              )
+            }
+
             if (contentLength) {
               throw errors.INVALID_MESSAGE(
                 "Conflicting 'Content-Length' and 'Transfer-Encoding' headers"
