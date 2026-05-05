@@ -723,7 +723,7 @@ hello\r
   t.is(result[2].type, END)
 })
 
-test('request, stacked transfer-encoding without chunked last', (t) => {
+test('request, stacked transfer-encoding without chunked last', async (t) => {
   const parser = new HTTPParser()
 
   const input = `POST /users HTTP/1.1\r
@@ -733,12 +733,48 @@ Content-Length: 5\r
 \r
 hello`
 
-  const result = [...parser.push(input)]
+  await t.exception(() => [...parser.push(input)], /INVALID_MESSAGE/)
+})
 
-  t.is(result[0].type, REQUEST)
-  t.is(result[1].type, DATA)
-  t.alike(result[1].data, Buffer.from('hello'))
-  t.is(result[2].type, END)
+test('request, transfer-encoding without chunked', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: example.com\r
+Transfer-Encoding: gzip\r
+Content-Length: 5\r
+\r
+hello`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_MESSAGE/)
+})
+
+test('request, transfer-encoding identity rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: example.com\r
+Transfer-Encoding: identity\r
+Content-Length: 5\r
+\r
+hello`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_MESSAGE/)
+})
+
+test('request, transfer-encoding chunked appearing twice', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: example.com\r
+Transfer-Encoding: chunked, gzip, chunked\r
+\r
+5\r
+hello\r
+0\r
+\r\n`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_MESSAGE/)
 })
 
 test('request, separator chars rejected in header name', async (t) => {
