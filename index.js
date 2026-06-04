@@ -69,7 +69,7 @@ module.exports = exports = class HTTPParser {
     this._reason = ''
 
     this._headerName = ''
-    this._headers = {}
+    this._headers = Object.create(null)
     this._headerCount = 0
     this._headerSize = 0
 
@@ -398,7 +398,7 @@ module.exports = exports = class HTTPParser {
         case FIRST_LINE_LF: {
           if (byte !== LF) throw errors.INVALID_MESSAGE()
 
-          this._headers = {}
+          this._headers = Object.create(null)
           this._headerCount = 0
           this._state = HEADER_START
 
@@ -483,7 +483,7 @@ module.exports = exports = class HTTPParser {
         case HEADER_END_LF: {
           if (byte !== LF) throw errors.INVALID_MESSAGE()
 
-          const headers = this._headers
+          const headers = { ...this._headers }
 
           if (this._isResponse) {
             yield {
