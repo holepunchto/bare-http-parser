@@ -19,8 +19,13 @@ const UPPER_Z = 0x5a
 const LOWER_A = 0x61
 const LOWER_F = 0x66
 const COLON = 0x3a
+const SEMICOLON = 0x3b
+const SLASH = 0x2f
 
 const MAX_CHUNK_SIZE_LENGTH = 16
+const STATUS_CODE_LENGTH = 3
+
+const MAX_APPLY_LENGTH = 4096
 
 // Header states
 const FIRST_TOKEN = 0
@@ -38,15 +43,25 @@ const HEADER_END_LF = 11
 
 // Body states
 const BODY = 12
-const CHUNK_SIZE = 13
-const CHUNK_SIZE_LF = 14
-const CHUNK_DATA = 15
-const CHUNK_EXTENSION = 16
+const BODY_EOF = 13
+const CHUNK_SIZE = 14
+const CHUNK_SIZE_LF = 15
+const CHUNK_DATA = 16
+const CHUNK_DATA_CR = 17
+const CHUNK_DATA_LF = 18
+const CHUNK_EXTENSION = 19
 
 // Trailing states
-const LAST_CHUNK_LF = 17
-const TRAILER_CR = 18
-const TRAILER_LF = 19
+const LAST_CHUNK_LF = 20
+const TRAILER_START = 21
+const TRAILER_NAME = 22
+const TRAILER_VALUE = 23
+const TRAILER_LINE_LF = 24
+const TRAILER_END_LF = 25
+
+// The connection has been handed over to another protocol and the remaining
+// bytes are no longer ours to parse.
+const TUNNEL = 26
 
 module.exports = exports = class HTTPParser {
   constructor(opts = {}) {
@@ -60,6 +75,7 @@ module.exports = exports = class HTTPParser {
     this._byteIndex = 0
     this._buffered = 0
     this._accumulator = []
+    this._fatal = null
 
     this._isResponse = false
     this._method = ''
@@ -74,20 +90,60 @@ module.exports = exports = class HTTPParser {
     this._headerSize = 0
 
     this._remaining = 0
+    this._skipBody = false
+  }
+
+  skipBody() {
+    this._skipBody = true
   }
 
   *push(data, encoding) {
+    if (this._fatal !== null) throw this._fatal
+
     if (typeof data === 'string') data = Buffer.from(data, encoding)
 
-    this._buffer.push(data)
-    this._buffered += data.byteLength
+    if (data.byteLength > 0) {
+      this._buffer.push(data)
+      this._buffered += data.byteLength
+    }
 
-    yield* this._parse()
+    try {
+      yield* this._parse()
+    } catch (err) {
+      this._fatal = err
+      throw err
+    }
 
     this._compact()
   }
 
-  end() {
+  *end() {
+    if (this._fatal !== null) throw this._fatal
+
+    const state = this._state
+    const pending = this._accumulator.length > 0
+
+    this._state = FIRST_TOKEN
+    this._accumulator = []
+    this._headerName = ''
+    this._headerSize = 0
+    this._remaining = 0
+    this._skipBody = false
+
+    if (state === BODY_EOF) {
+      yield { type: constants.END }
+
+      return
+    }
+
+    if (state === TUNNEL || (state === FIRST_TOKEN && pending === false)) return
+
+    this._fatal = errors.INVALID_MESSAGE('Message truncated by end of stream')
+
+    throw this._fatal
+  }
+
+  drain() {
     const buffers = this._buffer
     const bufferIndex = this._bufferIndex
     const byteIndex = this._byteIndex
@@ -164,9 +220,19 @@ module.exports = exports = class HTTPParser {
   }
 
   _buildString() {
-    const string = String.fromCharCode.apply(null, this._accumulator)
+    const accumulator = this._accumulator
 
     this._accumulator = []
+
+    if (accumulator.length <= MAX_APPLY_LENGTH) {
+      return String.fromCharCode.apply(null, accumulator)
+    }
+
+    let string = ''
+
+    for (let i = 0, n = accumulator.length; i < n; i += MAX_APPLY_LENGTH) {
+      string += String.fromCharCode.apply(null, accumulator.slice(i, i + MAX_APPLY_LENGTH))
+    }
 
     return string
   }
@@ -174,6 +240,12 @@ module.exports = exports = class HTTPParser {
   _checkHeaderSize() {
     if (++this._headerSize > this._maxHeaderSize) {
       throw errors.INVALID_MESSAGE('Header exceeds limit of ' + this._maxHeaderSize + ' bytes')
+    }
+  }
+
+  _checkHeaderCount() {
+    if (++this._headerCount > this._maxHeadersCount) {
+      throw errors.INVALID_MESSAGE('Header count exceeds limit of ' + this._maxHeadersCount)
     }
   }
 
@@ -186,11 +258,7 @@ module.exports = exports = class HTTPParser {
 
     if (end < value.length) value = value.substring(0, end)
 
-    this._headerCount++
-
-    if (this._headerCount > this._maxHeadersCount) {
-      throw errors.INVALID_MESSAGE('Header count exceeds limit of ' + this._maxHeadersCount)
-    }
+    this._checkHeaderCount()
 
     switch (name) {
       case '__proto__':
@@ -220,8 +288,24 @@ module.exports = exports = class HTTPParser {
     }
   }
 
+  _checkTrailer(name) {
+    switch (name) {
+      // A trailer arrives after the headers have already been surfaced, so a
+      // framing or routing header here could never be acted upon and is only
+      // ever an attempt to smuggle one past the consumer.
+      case 'host':
+      case 'content-length':
+      case 'transfer-encoding':
+        throw errors.INVALID_HEADER("Header '" + name + "' must not appear in a trailer")
+    }
+
+    this._checkHeaderCount()
+  }
+
   *_parse() {
     while (true) {
+      if (this._state === TUNNEL) return
+
       if (this._state === BODY) {
         if (this._buffered === 0) return
 
@@ -241,19 +325,23 @@ module.exports = exports = class HTTPParser {
         continue
       }
 
+      if (this._state === BODY_EOF) {
+        if (this._buffered === 0) return
+
+        yield { type: constants.DATA, data: this._consume(this._buffered) }
+
+        continue
+      }
+
       if (this._state === CHUNK_DATA) {
-        if (this._buffered < this._remaining) return
+        if (this._buffered === 0) return
 
-        const consumed = this._consume(this._remaining)
+        const available = Math.min(this._buffered, this._remaining)
+        const data = this._consume(available)
 
-        if (consumed[this._remaining - 2] !== CR || consumed[this._remaining - 1] !== LF) {
-          throw errors.INVALID_MESSAGE('Expected CRLF after chunk data')
-        }
+        this._remaining -= available
 
-        const data = consumed.subarray(0, this._remaining - 2)
-
-        this._remaining = 0
-        this._state = CHUNK_SIZE
+        if (this._remaining === 0) this._state = CHUNK_DATA_CR
 
         yield { type: constants.DATA, data }
 
@@ -298,7 +386,7 @@ module.exports = exports = class HTTPParser {
           } else if (isTokenByte(byte)) {
             this._accumulator.push(byte)
           } else if (
-            byte === 0x2f &&
+            byte === SLASH &&
             this._accumulator.length === 4 &&
             this._accumulator[0] === 0x48 &&
             this._accumulator[1] === 0x54 &&
@@ -324,7 +412,7 @@ module.exports = exports = class HTTPParser {
             this._state = REQUEST_VERSION
           } else if (byte === CR) {
             throw errors.INVALID_MESSAGE()
-          } else if (byte >= 0x21 && byte !== 0x7f) {
+          } else if (isVisibleByte(byte)) {
             this._accumulator.push(byte)
           } else {
             throw errors.INVALID_MESSAGE()
@@ -344,7 +432,7 @@ module.exports = exports = class HTTPParser {
             }
 
             this._state = FIRST_LINE_LF
-          } else if (byte >= 0x21 && byte !== 0x7f) {
+          } else if (isVisibleByte(byte)) {
             this._accumulator.push(byte)
           } else {
             throw errors.INVALID_MESSAGE()
@@ -356,22 +444,39 @@ module.exports = exports = class HTTPParser {
         case STATUS_CODE: {
           this._checkHeaderSize()
 
-          if (byte === SP) {
-            if (this._accumulator.length === 0) throw errors.INVALID_MESSAGE()
+          if (byte === SP || byte === CR) {
+            // RFC 9112 fixes the status code at exactly three digits, which
+            // also rules out the leading zeroes that would let a peer dress one
+            // code up as another.
+            if (this._accumulator.length !== STATUS_CODE_LENGTH) {
+              throw errors.INVALID_MESSAGE()
+            }
 
             let code = 0
 
-            for (let i = 0, n = this._accumulator.length; i < n; i++) {
+            for (let i = 0; i < STATUS_CODE_LENGTH; i++) {
               code = code * 10 + this._accumulator[i]
             }
 
             this._accumulator = []
 
-            if (code < 100 || code > 999) throw errors.INVALID_MESSAGE()
+            if (code < 100) throw errors.INVALID_MESSAGE()
 
             this._code = code
-            this._state = STATUS_REASON
+
+            // The space and the reason phrase after it are both routinely left
+            // out in practice, even though RFC 9112 requires the space.
+            if (byte === CR) {
+              this._reason = ''
+              this._state = FIRST_LINE_LF
+            } else {
+              this._state = STATUS_REASON
+            }
           } else if (byte >= ZERO && byte <= NINE) {
+            if (this._accumulator.length === STATUS_CODE_LENGTH) {
+              throw errors.INVALID_MESSAGE()
+            }
+
             this._accumulator.push(byte - ZERO)
           } else {
             throw errors.INVALID_MESSAGE()
@@ -485,32 +590,21 @@ module.exports = exports = class HTTPParser {
 
           const headers = { ...this._headers }
 
-          if (this._isResponse) {
-            yield {
-              type: constants.RESPONSE,
-              version: this._version,
-              code: this._code,
-              reason: this._reason,
-              headers
-            }
-          } else {
-            if (this._version === 'HTTP/1.1' && !('host' in headers)) {
-              throw errors.INVALID_HEADER("Header 'Host' is missing")
-            }
-
-            yield {
-              type: constants.REQUEST,
-              version: this._version,
-              method: this._method,
-              url: this._url,
-              headers
-            }
+          if (!this._isResponse && this._version === 'HTTP/1.1' && !('host' in headers)) {
+            throw errors.INVALID_HEADER("Header 'Host' is missing")
           }
 
+          // Resolve the framing before the message is surfaced so that a
+          // consumer never gets to act on a message we go on to reject.
           const transferEncoding = headers['transfer-encoding']
           const contentLength = headers['content-length']
 
-          if (transferEncoding) {
+          let chunked = false
+          let length = -1
+
+          // A header that is present but empty still has to be validated, so
+          // test for presence rather than truthiness.
+          if (transferEncoding !== undefined) {
             const encodings = transferEncoding.split(',')
 
             let chunkedCount = 0
@@ -531,22 +625,24 @@ module.exports = exports = class HTTPParser {
               )
             }
 
-            if (contentLength) {
+            if (contentLength !== undefined) {
               throw errors.INVALID_MESSAGE(
                 "Conflicting 'Content-Length' and 'Transfer-Encoding' headers"
               )
             }
 
-            this._state = CHUNK_SIZE
-            this._headerSize = 0
+            // An HTTP/1.0 peer cannot be assumed to understand chunked framing,
+            // so the two disagreeing about where the body ends is a smuggling
+            // opportunity.
+            if (this._version === 'HTTP/1.0') {
+              throw errors.INVALID_MESSAGE("'Transfer-Encoding' requires HTTP/1.1")
+            }
 
-            continue
-          }
-
-          if (contentLength) {
+            chunked = true
+          } else if (contentLength !== undefined) {
             if (contentLength.length === 0) throw errors.INVALID_CONTENT_LENGTH()
 
-            let length = 0
+            length = 0
 
             for (let i = 0, n = contentLength.length; i < n; i++) {
               const c = contentLength.charCodeAt(i)
@@ -556,23 +652,64 @@ module.exports = exports = class HTTPParser {
               length = length * 10 + (c - ZERO)
             }
 
-            if (!Number.isSafeInteger(length) || length < 0) {
-              throw errors.INVALID_CONTENT_LENGTH()
-            }
+            if (!Number.isSafeInteger(length)) throw errors.INVALID_CONTENT_LENGTH()
+          }
 
-            if (length === 0) {
-              this._state = FIRST_TOKEN
-              this._headerSize = 0
+          // A response to a `HEAD` request, an informational response, and a
+          // `204` or `304` response all carry no body whatever their framing
+          // headers say. Reading one would consume the response that follows.
+          const bodyless =
+            this._isResponse &&
+            (this._skipBody || this._code < 200 || this._code === 204 || this._code === 304)
 
-              yield { type: constants.END }
-            } else {
-              this._state = BODY
-              this._remaining = length
-              this._headerSize = 0
+          this._skipBody = false
+          this._headerSize = 0
+
+          if (this._isResponse) {
+            yield {
+              type: constants.RESPONSE,
+              version: this._version,
+              code: this._code,
+              reason: this._reason,
+              headers
             }
           } else {
+            yield {
+              type: constants.REQUEST,
+              version: this._version,
+              method: this._method,
+              url: this._url,
+              headers
+            }
+          }
+
+          // A `CONNECT` request and a `101` response both hand the connection
+          // over to another protocol. Stop parsing rather than misreading the
+          // bytes that follow, and leave them for `end()`.
+          if (this._isResponse ? this._code === 101 : this._method === 'CONNECT') {
+            this._state = TUNNEL
+
+            yield { type: constants.END }
+
+            break
+          }
+
+          if (bodyless || length === 0) {
             this._state = FIRST_TOKEN
-            this._headerSize = 0
+
+            yield { type: constants.END }
+          } else if (chunked) {
+            this._state = CHUNK_SIZE
+          } else if (length > 0) {
+            this._state = BODY
+            this._remaining = length
+          } else if (this._isResponse) {
+            // A response with no framing headers runs until the connection
+            // closes. Treating it as empty would turn its body into the next
+            // response.
+            this._state = BODY_EOF
+          } else {
+            this._state = FIRST_TOKEN
 
             yield { type: constants.END }
           }
@@ -581,7 +718,7 @@ module.exports = exports = class HTTPParser {
         }
 
         case CHUNK_SIZE: {
-          if (byte === CR || byte === 0x3b) {
+          if (byte === CR || byte === SEMICOLON) {
             if (this._accumulator.length === 0) throw errors.INVALID_CHUNK_LENGTH()
 
             let length = 0
@@ -594,13 +731,13 @@ module.exports = exports = class HTTPParser {
 
             if (!Number.isSafeInteger(length)) throw errors.INVALID_CHUNK_LENGTH()
 
-            if (byte === 0x3b) {
-              this._remaining = length
+            this._remaining = length
+
+            if (byte === SEMICOLON) {
               this._state = CHUNK_EXTENSION
             } else if (length === 0) {
               this._state = LAST_CHUNK_LF
             } else {
-              this._remaining = length + 2
               this._state = CHUNK_SIZE_LF
             }
           } else if (isHex(byte)) {
@@ -620,12 +757,7 @@ module.exports = exports = class HTTPParser {
           this._checkHeaderSize()
 
           if (byte === CR) {
-            if (this._remaining === 0) {
-              this._state = LAST_CHUNK_LF
-            } else {
-              this._remaining += 2
-              this._state = CHUNK_SIZE_LF
-            }
+            this._state = this._remaining === 0 ? LAST_CHUNK_LF : CHUNK_SIZE_LF
           } else if (!isFieldByte(byte)) {
             throw errors.INVALID_CHUNK_LENGTH()
           }
@@ -641,23 +773,79 @@ module.exports = exports = class HTTPParser {
           break
         }
 
+        case CHUNK_DATA_CR: {
+          if (byte !== CR) throw errors.INVALID_MESSAGE('Expected CRLF after chunk data')
+
+          this._state = CHUNK_DATA_LF
+
+          break
+        }
+
+        case CHUNK_DATA_LF: {
+          if (byte !== LF) throw errors.INVALID_MESSAGE('Expected CRLF after chunk data')
+
+          this._state = CHUNK_SIZE
+          this._headerSize = 0
+
+          break
+        }
+
         case LAST_CHUNK_LF: {
           if (byte !== LF) throw errors.INVALID_CHUNK_LENGTH()
 
-          this._state = TRAILER_CR
+          this._state = TRAILER_START
 
           break
         }
 
-        case TRAILER_CR: {
-          if (byte !== CR) throw errors.INVALID_MESSAGE()
+        case TRAILER_START: {
+          this._checkHeaderSize()
 
-          this._state = TRAILER_LF
+          if (byte === CR) {
+            this._state = TRAILER_END_LF
+          } else if (byte !== COLON && isTokenByte(byte)) {
+            this._accumulator.push(byte >= UPPER_A && byte <= UPPER_Z ? byte + 0x20 : byte)
+            this._state = TRAILER_NAME
+          } else {
+            throw errors.INVALID_HEADER()
+          }
 
           break
         }
 
-        case TRAILER_LF: {
+        case TRAILER_NAME: {
+          this._checkHeaderSize()
+
+          if (byte === COLON) {
+            this._checkTrailer(this._buildString())
+            this._state = TRAILER_VALUE
+          } else if (byte !== COLON && isTokenByte(byte)) {
+            this._accumulator.push(byte >= UPPER_A && byte <= UPPER_Z ? byte + 0x20 : byte)
+          } else {
+            throw errors.INVALID_HEADER()
+          }
+
+          break
+        }
+
+        case TRAILER_VALUE: {
+          this._checkHeaderSize()
+
+          if (byte === CR) this._state = TRAILER_LINE_LF
+          else if (!isFieldByte(byte)) throw errors.INVALID_HEADER()
+
+          break
+        }
+
+        case TRAILER_LINE_LF: {
+          if (byte !== LF) throw errors.INVALID_HEADER()
+
+          this._state = TRAILER_START
+
+          break
+        }
+
+        case TRAILER_END_LF: {
           if (byte !== LF) throw errors.INVALID_MESSAGE()
 
           this._state = FIRST_TOKEN
@@ -694,6 +882,10 @@ function isTokenByte(b) {
 
 function isFieldByte(b) {
   return b === TAB || (b >= 0x20 && b <= 0x7e)
+}
+
+function isVisibleByte(b) {
+  return b >= 0x21 && b <= 0x7e
 }
 
 function isHex(b) {

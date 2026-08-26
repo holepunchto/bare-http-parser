@@ -556,7 +556,7 @@ test('request, byte by byte', (t) => {
   t.alike(body, Buffer.from('hello'))
 })
 
-test('end, returns remaining after upgrade', (t) => {
+test('drain, returns remaining after upgrade', (t) => {
   const parser = new HTTPParser()
 
   const input =
@@ -576,11 +576,11 @@ test('end, returns remaining after upgrade', (t) => {
   const end = it.next()
   t.is(end.value.type, END)
 
-  const remaining = parser.end()
+  const remaining = parser.drain()
   t.alike(remaining, Buffer.from('websocket-frame-data-here'))
 })
 
-test('end, returns body when generator abandoned after header', (t) => {
+test('drain, returns body when generator abandoned after header', (t) => {
   const parser = new HTTPParser()
 
   const input =
@@ -595,7 +595,7 @@ test('end, returns body when generator abandoned after header', (t) => {
   const header = it.next()
   t.is(header.value.type, REQUEST)
 
-  const remaining = parser.end()
+  const remaining = parser.drain()
   t.alike(remaining, Buffer.from('hello world'))
 })
 
@@ -1047,7 +1047,7 @@ test('request, control character in version rejected', async (t) => {
   await t.exception(() => [...parser.push(input)], /INVALID/)
 })
 
-test('end, returns empty after full consumption', (t) => {
+test('drain, returns empty after full consumption', (t) => {
   const parser = new HTTPParser()
 
   const input = 'GET / HTTP/1.0\r\n\r\n'
@@ -1057,6 +1057,586 @@ test('end, returns empty after full consumption', (t) => {
   t.is(result[0].type, REQUEST)
   t.is(result[1].type, END)
 
-  const remaining = parser.end()
+  const remaining = parser.drain()
   t.alike(remaining, Buffer.alloc(0))
+})
+
+test('parser, remains fatal after a rejected header', async (t) => {
+  const parser = new HTTPParser()
+
+  // Resuming after the error would splice the two halves of the rejected name
+  // back together and turn 'Content-Leng\0th' into a live 'Content-Length'.
+  const input = Buffer.concat([
+    Buffer.from('POST /users HTTP/1.1\r\nHost: example.com\r\nContent-Leng'),
+    Buffer.from([0x00])
+  ])
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+  await t.exception(() => [...parser.push('th: 5\r\n\r\nhello')], /INVALID_HEADER/)
+})
+
+test('parser, remains fatal after a rejected message', async (t) => {
+  const parser = new HTTPParser()
+
+  await t.exception(() => [...parser.push('GET /users HTTP/2.0\r\n\r\n')], /INVALID_MESSAGE/)
+  await t.exception(
+    () => [...parser.push('GET /users HTTP/1.0\r\n\r\n')],
+    /INVALID_MESSAGE/,
+    'a well formed message does not clear the error'
+  )
+})
+
+test('request, empty content-length rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: example.com\r
+Content-Length:\r
+\r
+GET /admin HTTP/1.1\r
+Host: example.com\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_CONTENT_LENGTH/)
+})
+
+test('request, empty transfer-encoding rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: example.com\r
+Transfer-Encoding:\r
+Content-Length: 5\r
+\r
+hello`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_MESSAGE/)
+})
+
+test('request, whitespace-only transfer-encoding rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input =
+    'POST /users HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: \t \r\n' +
+    'Content-Length: 5\r\n\r\nhello'
+
+  await t.exception(() => [...parser.push(input)], /INVALID_MESSAGE/)
+})
+
+test('request, conflicting content-length and transfer-encoding rejected before the request is emitted', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: example.com\r
+Content-Length: 5\r
+Transfer-Encoding: chunked\r
+\r
+`
+
+  const result = []
+
+  await t.exception(() => {
+    for (const event of parser.push(input)) result.push(event)
+  }, /INVALID_MESSAGE/)
+
+  t.alike(result, [], 'a message that is about to be rejected is never surfaced')
+})
+
+test('request, http/1.0 with transfer-encoding rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = 'POST /users HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n'
+
+  await t.exception(() => [...parser.push(input)], /INVALID_MESSAGE/)
+})
+
+test('chunked request, chunk data emitted as it arrives', (t) => {
+  const parser = new HTTPParser()
+
+  t.is(
+    [
+      ...parser.push(
+        'POST /users HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n'
+      )
+    ].length,
+    1
+  )
+
+  // Declare a chunk far larger than what follows. Holding the data back until
+  // the whole chunk arrives would let a peer pin arbitrary memory.
+  t.alike([...parser.push('100000\r\n')], [])
+  t.alike([...parser.push('hello')], [{ type: DATA, data: Buffer.from('hello') }])
+  t.alike([...parser.push('world')], [{ type: DATA, data: Buffer.from('world') }])
+})
+
+test('chunked request, chunk data and terminator split across pushes', (t) => {
+  const parser = new HTTPParser()
+
+  const input =
+    'POST /users HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n' +
+    '5\r\nhello\r\n0\r\n\r\n'
+
+  const result = []
+
+  for (const byte of input) {
+    for (const event of parser.push(byte)) result.push(event)
+  }
+
+  t.is(result.length, 7)
+  t.is(result[0].type, REQUEST)
+  t.alike(
+    result.slice(1, 6).map((event) => event.data),
+    [Buffer.from('h'), Buffer.from('e'), Buffer.from('l'), Buffer.from('l'), Buffer.from('o')]
+  )
+  t.is(result[6].type, END)
+})
+
+test('chunked request, chunk data longer than declared rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input =
+    'POST /users HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n' +
+    '2\r\nhello\r\n0\r\n\r\n'
+
+  await t.exception(() => [...parser.push(input)], /INVALID_MESSAGE/)
+})
+
+test('chunked request, chunk extensions do not exhaust the header budget', (t) => {
+  const parser = new HTTPParser()
+
+  ;[
+    ...parser.push(
+      'POST /users HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n'
+    )
+  ]
+
+  // The header budget is spent per message, so a long lived stream that carries
+  // an extension on every chunk must not run out of it.
+  let count = 0
+
+  for (let i = 0; i < 5000; i++) {
+    for (const event of parser.push('1;name=value\r\nx\r\n')) {
+      if (event.type === DATA) count++
+    }
+  }
+
+  t.is(count, 5000)
+})
+
+test('chunked request, trailer fields accepted', (t) => {
+  const parser = new HTTPParser()
+
+  const input =
+    'POST /users HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n' +
+    '5\r\nhello\r\n0\r\nX-Checksum: abc\r\nX-Trace: 1\r\n\r\n'
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].type, REQUEST)
+  t.alike(result[1], { type: DATA, data: Buffer.from('hello') })
+  t.is(result[2].type, END)
+  t.is(result.length, 3)
+})
+
+test('chunked request, trailer with framing header rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input =
+    'POST /users HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n' +
+    '0\r\nContent-Length: 5\r\n\r\n'
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
+test('chunked request, trailer with control character rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from(
+      'POST /users HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-Trace: '
+    ),
+    Buffer.from([0x00]),
+    Buffer.from('\r\n\r\n')
+  ])
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
+test('chunked request, trailers count towards max headers count', async (t) => {
+  const parser = new HTTPParser({ maxHeadersCount: 3 })
+
+  const input =
+    'POST /users HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n' +
+    '0\r\nX-A: 1\r\nX-B: 2\r\n\r\n'
+
+  await t.exception(() => [...parser.push(input)], /Header count exceeds limit/)
+})
+
+test('response, no content-length or transfer-encoding is framed by end of stream', (t) => {
+  const parser = new HTTPParser()
+
+  const result = [...parser.push('HTTP/1.1 200 OK\r\n\r\n')]
+
+  t.is(result.length, 1)
+  t.is(result[0].type, RESPONSE)
+
+  // Treating the missing framing as an empty body would turn the body into the
+  // next response.
+  t.alike([...parser.push('hello ')], [{ type: DATA, data: Buffer.from('hello ') }])
+  t.alike([...parser.push('world')], [{ type: DATA, data: Buffer.from('world') }])
+
+  // Only the connection closing can terminate the message.
+  t.alike([...parser.end()], [{ type: END }])
+  t.alike(parser.drain(), Buffer.alloc(0))
+})
+
+test('response, skip body for head response', (t) => {
+  const parser = new HTTPParser()
+
+  parser.skipBody()
+
+  const input = `HTTP/1.1 200 OK\r
+Content-Length: 100\r
+\r
+HTTP/1.1 204 No Content\r
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  t.is(result.length, 4)
+  t.is(result[0].code, 200)
+  t.is(result[1].type, END)
+  t.is(result[2].code, 204)
+  t.is(result[3].type, END)
+})
+
+test('response, skip body applies to a single response', (t) => {
+  const parser = new HTTPParser()
+
+  parser.skipBody()
+
+  const input = `HTTP/1.1 200 OK\r
+Content-Length: 3\r
+\r
+HTTP/1.1 200 OK\r
+Content-Length: 3\r
+\r
+abc`
+
+  const result = [...parser.push(input)]
+
+  t.is(result.length, 5)
+  t.is(result[1].type, END)
+  t.alike(result[3], { type: DATA, data: Buffer.from('abc') })
+})
+
+test('response, informational response has no body', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `HTTP/1.1 100 Continue\r
+Content-Length: 5\r
+\r
+HTTP/1.1 200 OK\r
+Content-Length: 2\r
+\r
+hi`
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].code, 100)
+  t.is(result[1].type, END)
+  t.is(result[2].code, 200)
+  t.alike(result[3], { type: DATA, data: Buffer.from('hi') })
+  t.is(result[4].type, END)
+})
+
+test('response, 204 has no body', (t) => {
+  const parser = new HTTPParser()
+
+  const result = [...parser.push('HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n')]
+
+  t.is(result.length, 2)
+  t.is(result[0].code, 204)
+  t.is(result[1].type, END)
+})
+
+test('response, 304 with content-length has no body', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `HTTP/1.1 304 Not Modified\r
+Content-Length: 5\r
+\r
+HTTP/1.1 200 OK\r
+Content-Length: 0\r
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  t.is(result.length, 4)
+  t.is(result[0].code, 304)
+  t.is(result[2].code, 200)
+})
+
+test('response, status line without reason phrase', (t) => {
+  const parser = new HTTPParser()
+
+  const result = [...parser.push('HTTP/1.1 200\r\nContent-Length: 0\r\n\r\n')]
+
+  t.is(result[0].type, RESPONSE)
+  t.is(result[0].code, 200)
+  t.is(result[0].reason, '')
+})
+
+test('response, status code with leading zeros rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  await t.exception(() => [...parser.push('HTTP/1.1 0200 OK\r\n\r\n')], /INVALID_MESSAGE/)
+})
+
+test('response, status code with fewer than three digits rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  await t.exception(() => [...parser.push('HTTP/1.1 20 OK\r\n\r\n')], /INVALID_MESSAGE/)
+})
+
+test('request, connect enters a tunnel', (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from('CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n'),
+    Buffer.from([0x16, 0x03, 0x01, 0x00, 0x05])
+  ])
+
+  const result = [...parser.push(input)]
+
+  t.is(result.length, 2)
+  t.is(result[0].method, 'CONNECT')
+  t.is(result[1].type, END)
+
+  // The tunnelled bytes are not ours to parse and must survive intact.
+  t.alike(parser.drain(), Buffer.from([0x16, 0x03, 0x01, 0x00, 0x05]))
+})
+
+test('response, 101 enters a tunnel', (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n'),
+    Buffer.from([0x81, 0x05])
+  ])
+
+  const result = [...parser.push(input)]
+
+  t.is(result.length, 2)
+  t.is(result[0].code, 101)
+  t.is(result[1].type, END)
+
+  t.alike(parser.drain(), Buffer.from([0x81, 0x05]))
+})
+
+test('push, empty buffer before a message', (t) => {
+  const parser = new HTTPParser()
+
+  t.alike([...parser.push(Buffer.alloc(0))], [])
+
+  const result = [...parser.push('GET /users HTTP/1.0\r\n\r\n')]
+
+  t.is(result[0].type, REQUEST)
+  t.is(result[0].url, '/users')
+})
+
+test('push, empty buffer within a message', (t) => {
+  const parser = new HTTPParser()
+
+  const result = []
+
+  for (const chunk of ['GET /users HTT', '', Buffer.alloc(0), 'P/1.0\r\n\r\n']) {
+    for (const event of parser.push(chunk)) result.push(event)
+  }
+
+  t.is(result[0].type, REQUEST)
+  t.is(result[0].url, '/users')
+  t.is(result[1].type, END)
+})
+
+test('request, long header value with a large max header size', (t) => {
+  const parser = new HTTPParser({ maxHeaderSize: 1024 * 1024 })
+
+  const value = 'a'.repeat(256 * 1024)
+
+  const result = [...parser.push(`GET / HTTP/1.0\r\nX-Large: ${value}\r\n\r\n`)]
+
+  t.is(result[0].headers['x-large'], value)
+})
+
+test('end, rejects a truncated body', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /upload HTTP/1.1\r
+Host: example.com\r
+Content-Length: 11\r
+\r
+hello`
+
+  const result = [...parser.push(input)]
+
+  t.is(result.length, 2)
+  t.alike(result[1], { type: DATA, data: Buffer.from('hello') })
+
+  await t.exception(() => [...parser.end()], /Message truncated/)
+
+  // The truncated message must not be resumed by a later push.
+  await t.exception(
+    () => [...parser.push('GET /next HTTP/1.1\r\nHost: example.com\r\n\r\n')],
+    /Message truncated/
+  )
+})
+
+test('end, rejects a truncated head', async (t) => {
+  const parser = new HTTPParser()
+
+  t.alike([...parser.push('GET /users HTTP/1.1\r\nHost: exa')], [])
+
+  await t.exception(() => [...parser.end()], /Message truncated/)
+})
+
+test('end, rejects a truncated chunked body', async (t) => {
+  const parser = new HTTPParser()
+
+  const input =
+    'POST /users HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel'
+
+  t.is([...parser.push(input)].length, 2)
+
+  await t.exception(() => [...parser.end()], /Message truncated/)
+})
+
+test('end, yields nothing after a complete message', (t) => {
+  const parser = new HTTPParser()
+
+  t.is([...parser.push('GET /users HTTP/1.0\r\n\r\n')].length, 2)
+  t.alike([...parser.end()], [])
+})
+
+test('end, yields nothing after a tunnel', (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from('CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n'),
+    Buffer.from([0x16, 0x03])
+  ])
+
+  t.is([...parser.push(input)].length, 2)
+  t.alike([...parser.end()], [])
+  t.alike(parser.drain(), Buffer.from([0x16, 0x03]))
+})
+
+test('request, every token byte accepted in a header name', (t) => {
+  const parser = new HTTPParser()
+
+  // RFC 9110 tchar, which the token table is written out by hand to match.
+  const name = "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz"
+
+  const result = [
+    ...parser.push(`GET / HTTP/1.0\r\n${name.toUpperCase()}: value\r\n${name}: value\r\n\r\n`)
+  ]
+
+  t.is(result[0].headers[name], 'value, value')
+})
+
+test('request, obs-text in header name rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from('GET / HTTP/1.0\r\nX-'),
+    Buffer.from([0x80]),
+    Buffer.from(': value\r\n\r\n')
+  ])
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
+test('request, obs-text in header value rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from('GET / HTTP/1.0\r\nX-Name: '),
+    Buffer.from([0x80]),
+    Buffer.from('\r\n\r\n')
+  ])
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
+test('request, obs-text in url rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from('GET /us'),
+    Buffer.from([0x80]),
+    Buffer.from('ers HTTP/1.0\r\n\r\n')
+  ])
+
+  await t.exception(() => [...parser.push(input)], /INVALID_MESSAGE/)
+})
+
+test('request, obs-fold continuation line rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET / HTTP/1.0\r
+X-Name: first\r
+ second\r
+\r
+`
+
+  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
+test('request, bare lf rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  await t.exception(
+    () => [...parser.push('GET / HTTP/1.0\nHost: example.com\n\n')],
+    /INVALID_MESSAGE/
+  )
+})
+
+test('request, leading crlf before request line rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  await t.exception(() => [...parser.push('\r\nGET / HTTP/1.0\r\n\r\n')], /INVALID_MESSAGE/)
+})
+
+test('request, duplicate content-length with differing case rejected', async (t) => {
+  const parser = new HTTPParser()
+
+  const input = `POST /users HTTP/1.1\r
+Host: example.com\r
+Content-Length: 5\r
+content-length: 5\r
+\r
+hello`
+
+  await t.exception(() => [...parser.push(input)], /Duplicate header/)
+})
+
+test('request, pipelined requests', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /a HTTP/1.1\r
+Host: example.com\r
+\r
+GET /b HTTP/1.1\r
+Host: example.com\r
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  t.is(result.length, 4)
+  t.is(result[0].url, '/a')
+  t.is(result[2].url, '/b')
 })
