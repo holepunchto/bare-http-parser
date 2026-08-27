@@ -1619,16 +1619,36 @@ test('request, obs-text in header name rejected', async (t) => {
   await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
 })
 
-test('request, obs-text in header value rejected', async (t) => {
+test('request, obs-text in header value accepted', (t) => {
   const parser = new HTTPParser()
 
+  // RFC 9110 `field-vchar` covers `obs-text`, and a field value carrying a byte
+  // from 0x80 to 0xff is ordinary enough traffic that refusing it would turn a
+  // request every other implementation accepts into a 400. Each byte surfaces
+  // as the character of the same value, which is how Node.js surfaces it too.
   const input = Buffer.concat([
-    Buffer.from('GET / HTTP/1.0\r\nX-Name: '),
-    Buffer.from([0x80]),
+    Buffer.from('GET / HTTP/1.0\r\nX-Name: caf'),
+    Buffer.from([0xe9]),
     Buffer.from('\r\n\r\n')
   ])
 
-  await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+  const result = [...parser.push(input)]
+
+  t.is(result[0].headers['x-name'], 'caf\xe9')
+})
+
+test('response, obs-text in reason phrase accepted', (t) => {
+  const parser = new HTTPParser()
+
+  const input = Buffer.concat([
+    Buffer.from('HTTP/1.1 200 caf'),
+    Buffer.from([0xe9]),
+    Buffer.from('\r\nContent-Length: 0\r\n\r\n')
+  ])
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].reason, 'caf\xe9')
 })
 
 test('request, obs-text in url rejected', async (t) => {

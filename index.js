@@ -886,7 +886,7 @@ function isTokenByte(b) {
 }
 
 function isFieldByte(b) {
-  return b === TAB || (b >= 0x20 && b <= 0x7e)
+  return b === TAB || (b >= 0x20 && b <= 0x7e) || b >= 0x80
 }
 
 function isVisibleByte(b) {
