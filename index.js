@@ -239,13 +239,13 @@ module.exports = exports = class HTTPParser {
 
   _checkHeaderSize() {
     if (++this._headerSize > this._maxHeaderSize) {
-      throw errors.INVALID_MESSAGE('Header exceeds limit of ' + this._maxHeaderSize + ' bytes')
+      throw errors.HEADER_OVERFLOW('Header exceeds limit of ' + this._maxHeaderSize + ' bytes')
     }
   }
 
   _checkHeaderCount() {
     if (++this._headerCount > this._maxHeadersCount) {
-      throw errors.INVALID_MESSAGE('Header count exceeds limit of ' + this._maxHeadersCount)
+      throw errors.HEADER_OVERFLOW('Header count exceeds limit of ' + this._maxHeadersCount)
     }
   }
 
