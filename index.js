@@ -276,6 +276,11 @@ module.exports = exports = class HTTPParser {
         this._headers[name] = value
         break
 
+      case 'set-cookie':
+        if (name in this._headers) this._headers[name].push(value)
+        else this._headers[name] = [value]
+        break
+
       default: {
         const delimiter = name === 'cookie' ? '; ' : ', '
 
@@ -588,7 +593,7 @@ module.exports = exports = class HTTPParser {
         case HEADER_END_LF: {
           if (byte !== LF) throw errors.INVALID_MESSAGE()
 
-          const headers = { ...this._headers }
+          const headers = Object.assign(Object.create(null), this._headers)
 
           if (!this._isResponse && this._version === 'HTTP/1.1' && !('host' in headers)) {
             throw errors.INVALID_HEADER("Header 'Host' is missing")

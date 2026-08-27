@@ -5,6 +5,10 @@ const {
   constants: { REQUEST, RESPONSE, DATA, END }
 } = HTTPParser
 
+function bag(fields) {
+  return Object.assign(Object.create(null), fields)
+}
+
 test('request', (t) => {
   const parser = new HTTPParser()
 
@@ -23,11 +27,11 @@ name=FirstName+LastName&email=bsmth%40example.com`
         version: 'HTTP/1.1',
         method: 'POST',
         url: '/users',
-        headers: {
+        headers: bag({
           host: 'example.com',
           'content-type': 'application/x-www-form-urlencoded',
           'content-length': '49'
-        }
+        })
       },
       {
         type: DATA,
@@ -55,7 +59,7 @@ test('request, http/1.0 missing host', (t) => {
         version: 'HTTP/1.0',
         method: 'GET',
         url: '/users',
-        headers: {}
+        headers: bag({})
       },
       {
         type: END
@@ -101,12 +105,12 @@ Location: http://example.com/users/123\r
         version: 'HTTP/1.1',
         code: 201,
         reason: 'Created',
-        headers: {
+        headers: bag({
           host: 'example.com',
           'content-type': 'application/json',
           'content-length': '154',
           location: 'http://example.com/users/123'
-        }
+        })
       },
       {
         type: DATA,
@@ -149,10 +153,10 @@ Second chunk\r
         version: 'HTTP/1.1',
         code: 201,
         reason: 'Created',
-        headers: {
+        headers: bag({
           host: 'example.com',
           'transfer-encoding': 'chunked'
-        }
+        })
       },
       {
         type: DATA,
@@ -191,10 +195,10 @@ Second chunk\r
         version: 'HTTP/1.1',
         code: 201,
         reason: 'Created',
-        headers: {
+        headers: bag({
           host: 'example.com',
           'transfer-encoding': 'chunked'
-        }
+        })
       },
       {
         type: DATA,
@@ -212,10 +216,10 @@ Second chunk\r
         version: 'HTTP/1.1',
         code: 201,
         reason: 'Created',
-        headers: {
+        headers: bag({
           host: 'example.com',
           'transfer-encoding': 'chunked'
-        }
+        })
       },
       {
         type: DATA,
@@ -686,6 +690,62 @@ prototype: value\r
 `
 
   await t.exception(() => [...parser.push(input)], /INVALID_HEADER/)
+})
+
+// Rejecting the three names that reach `Object.prototype` only helps if the bag
+// they would have reached it through has no prototype to begin with. A consumer
+// that looks up a header name the peer chose must be told the header is absent,
+// not handed whatever `Object.prototype` happens to carry under that name.
+test('request, headers are surfaced without a prototype', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /users HTTP/1.1\r
+Host: example.com\r
+\r
+`
+
+  const [{ headers }] = [...parser.push(input)]
+
+  t.is(Object.getPrototypeOf(headers), null, 'no prototype')
+
+  for (const name of ['constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+    t.is(headers[name], undefined, name + ' reads as absent')
+    t.absent(name in headers, name + ' is not present')
+  }
+})
+
+test('response, headers are surfaced without a prototype', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `HTTP/1.1 200 OK\r
+Content-Length: 0\r
+\r
+`
+
+  const [{ headers }] = [...parser.push(input)]
+
+  t.is(Object.getPrototypeOf(headers), null, 'no prototype')
+  t.is(headers.constructor, undefined, 'constructor reads as absent')
+})
+
+// Each message gets a bag of its own, so that one a consumer is still holding
+// cannot be changed underneath it by whatever the peer sends next.
+test('request, headers are not shared between messages', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /a HTTP/1.1\r
+Host: a.example.com\r
+\r
+GET /b HTTP/1.1\r
+Host: b.example.com\r
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  t.not(result[0].headers, result[2].headers, 'a bag each')
+  t.is(result[0].headers.host, 'a.example.com', 'first left as it was')
+  t.is(result[2].headers.host, 'b.example.com', 'second read separately')
 })
 
 test('request, duplicate headers combined with comma', (t) => {
@@ -1639,4 +1699,74 @@ Host: example.com\r
   t.is(result.length, 4)
   t.is(result[0].url, '/a')
   t.is(result[2].url, '/b')
+})
+
+// A cookie carries the commas that would otherwise separate the elements inside
+// its own value, so a folded `Set-Cookie` could never be taken apart again.
+test('response, set-cookie is kept as a list', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `HTTP/1.1 200 OK\r
+Set-Cookie: session=abc; Expires=Wed, 21 Oct 2026 07:28:00 GMT; HttpOnly\r
+Set-Cookie: theme=dark; Path=/\r
+Content-Length: 0\r
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  t.alike(result[0].headers['set-cookie'], [
+    'session=abc; Expires=Wed, 21 Oct 2026 07:28:00 GMT; HttpOnly',
+    'theme=dark; Path=/'
+  ])
+})
+
+test('response, a lone set-cookie is a list too', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `HTTP/1.1 200 OK\r
+Set-Cookie: session=abc\r
+Content-Length: 0\r
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  t.alike(result[0].headers['set-cookie'], ['session=abc'])
+})
+
+test('request, cookie is folded onto one line', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `GET /a HTTP/1.1\r
+Host: example.com\r
+Cookie: session=abc\r
+Cookie: theme=dark\r
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  // Unlike `Set-Cookie`, `Cookie` may only appear once and its own separator is
+  // `; `, so the elements are folded back onto the one line they belong on.
+  t.is(result[0].headers.cookie, 'session=abc; theme=dark')
+})
+
+test('response, set-cookie does not leak into the next message', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `HTTP/1.1 200 OK\r
+Set-Cookie: a=1\r
+Content-Length: 0\r
+\r
+HTTP/1.1 200 OK\r
+Set-Cookie: b=2\r
+Content-Length: 0\r
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  t.alike(result[0].headers['set-cookie'], ['a=1'])
+  t.alike(result[2].headers['set-cookie'], ['b=2'])
 })
