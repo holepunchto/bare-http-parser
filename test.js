@@ -281,7 +281,7 @@ X-Large: ${'A'.repeat(100)}\r
 \r
 `
 
-  await t.exception(() => [...parser.push(input)], /INVALID/)
+  await t.exception(() => [...parser.push(input)], /HEADER_OVERFLOW/)
 })
 
 test('request, too many headers', async (t) => {
@@ -295,7 +295,7 @@ ${headers}
 \r
 `
 
-  await t.exception(() => [...parser.push(input)], /INVALID/)
+  await t.exception(() => [...parser.push(input)], /HEADER_OVERFLOW/)
 })
 
 test('request, duplicate content-length', async (t) => {
@@ -440,7 +440,7 @@ test('request, header size exceeded across multiple pushes', async (t) => {
     for (const msg of parser.push(Buffer.from('X-Pad: ' + 'A'.repeat(30) + '\r\n\r\n'))) {
       result.push(msg)
     }
-  }, /INVALID/)
+  }, /HEADER_OVERFLOW/)
 })
 
 test('request, chunk length with leading whitespace', async (t) => {
@@ -902,7 +902,7 @@ X-D: 4\r
 \r
 `
 
-  await t.exception(() => [...parser.push(input)], /INVALID/)
+  await t.exception(() => [...parser.push(input)], /HEADER_OVERFLOW/)
 })
 
 test('request, header value trailing whitespace trimmed', (t) => {
@@ -1072,7 +1072,7 @@ test('chunked response, chunk extension exceeds header size limit', async (t) =>
     '0\r\n' +
     '\r\n'
 
-  await t.exception(() => [...parser.push(input)], /INVALID/)
+  await t.exception(() => [...parser.push(input)], /HEADER_OVERFLOW/)
 })
 
 test('response, invalid version rejected', async (t) => {
