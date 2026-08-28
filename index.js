@@ -29,39 +29,40 @@ const MAX_APPLY_LENGTH = 4096
 
 // Header states
 const FIRST_TOKEN = 0
-const REQUEST_URL = 1
-const REQUEST_VERSION = 2
-const STATUS_CODE = 3
-const STATUS_REASON = 4
-const FIRST_LINE_LF = 5
-const HEADER_START = 6
-const HEADER_NAME = 7
-const HEADER_VALUE_WS = 8
-const HEADER_VALUE = 9
-const HEADER_LINE_LF = 10
-const HEADER_END_LF = 11
+const LEADING_LINE_LF = 1
+const REQUEST_URL = 2
+const REQUEST_VERSION = 3
+const STATUS_CODE = 4
+const STATUS_REASON = 5
+const FIRST_LINE_LF = 6
+const HEADER_START = 7
+const HEADER_NAME = 8
+const HEADER_VALUE_WS = 9
+const HEADER_VALUE = 10
+const HEADER_LINE_LF = 11
+const HEADER_END_LF = 12
 
 // Body states
-const BODY = 12
-const BODY_EOF = 13
-const CHUNK_SIZE = 14
-const CHUNK_SIZE_LF = 15
-const CHUNK_DATA = 16
-const CHUNK_DATA_CR = 17
-const CHUNK_DATA_LF = 18
-const CHUNK_EXTENSION = 19
+const BODY = 13
+const BODY_EOF = 14
+const CHUNK_SIZE = 15
+const CHUNK_SIZE_LF = 16
+const CHUNK_DATA = 17
+const CHUNK_DATA_CR = 18
+const CHUNK_DATA_LF = 19
+const CHUNK_EXTENSION = 20
 
 // Trailing states
-const LAST_CHUNK_LF = 20
-const TRAILER_START = 21
-const TRAILER_NAME = 22
-const TRAILER_VALUE = 23
-const TRAILER_LINE_LF = 24
-const TRAILER_END_LF = 25
+const LAST_CHUNK_LF = 21
+const TRAILER_START = 22
+const TRAILER_NAME = 23
+const TRAILER_VALUE = 24
+const TRAILER_LINE_LF = 25
+const TRAILER_END_LF = 26
 
 // The connection has been handed over to another protocol and the remaining
 // bytes are no longer ours to parse.
-const TUNNEL = 26
+const TUNNEL = 27
 
 const METHODS = new Set([
   'ACL',
@@ -275,13 +276,19 @@ module.exports = exports = class HTTPParser {
     return string
   }
 
+  // Zero turns a limit off, as a caller that wants no limit has no other way of
+  // saying so and would otherwise get one that refuses every message.
   _checkHeaderSize() {
+    if (this._maxHeaderSize === 0) return
+
     if (++this._headerSize > this._maxHeaderSize) {
       throw errors.HEADER_OVERFLOW('Header exceeds limit of ' + this._maxHeaderSize + ' bytes')
     }
   }
 
   _checkHeaderCount() {
+    if (this._maxHeadersCount === 0) return
+
     if (++this._headerCount > this._maxHeadersCount) {
       throw errors.HEADER_OVERFLOW('Header count exceeds limit of ' + this._maxHeadersCount)
     }
@@ -429,7 +436,13 @@ module.exports = exports = class HTTPParser {
               this._state = REQUEST_URL
             }
           } else if (byte === CR) {
-            throw errors.INVALID_MESSAGE()
+            // RFC 9112 asks that an empty line before the start line be
+            // ignored, since a peer that ends a message with a stray CRLF
+            // leaves one behind. How many may be spent is bounded by the
+            // header size, which counts them like any other byte.
+            if (this._accumulator.length > 0) throw errors.INVALID_MESSAGE()
+
+            this._state = LEADING_LINE_LF
           } else if (isTokenByte(byte)) {
             this._accumulator.push(byte)
           } else if (
@@ -444,6 +457,14 @@ module.exports = exports = class HTTPParser {
           } else {
             throw errors.INVALID_MESSAGE()
           }
+
+          break
+        }
+
+        case LEADING_LINE_LF: {
+          if (byte !== LF) throw errors.INVALID_MESSAGE()
+
+          this._state = FIRST_TOKEN
 
           break
         }
