@@ -63,6 +63,44 @@ const TRAILER_END_LF = 25
 // bytes are no longer ours to parse.
 const TUNNEL = 26
 
+const METHODS = new Set([
+  'ACL',
+  'BIND',
+  'CHECKOUT',
+  'CONNECT',
+  'COPY',
+  'DELETE',
+  'GET',
+  'HEAD',
+  'LINK',
+  'LOCK',
+  'M-SEARCH',
+  'MERGE',
+  'MKACTIVITY',
+  'MKCALENDAR',
+  'MKCOL',
+  'MOVE',
+  'NOTIFY',
+  'OPTIONS',
+  'PATCH',
+  'POST',
+  'PROPFIND',
+  'PROPPATCH',
+  'PURGE',
+  'PUT',
+  'QUERY',
+  'REBIND',
+  'REPORT',
+  'SEARCH',
+  'SOURCE',
+  'SUBSCRIBE',
+  'TRACE',
+  'UNBIND',
+  'UNLINK',
+  'UNLOCK',
+  'UNSUBSCRIBE'
+])
+
 module.exports = exports = class HTTPParser {
   constructor(opts = {}) {
     const { maxHeaderSize = 16384, maxHeadersCount = 2000 } = opts
@@ -383,6 +421,10 @@ module.exports = exports = class HTTPParser {
               this._version = token
               this._state = STATUS_CODE
             } else {
+              if (METHODS.has(token) === false) {
+                throw errors.INVALID_METHOD("Unsupported method '" + token + "'")
+              }
+
               this._method = token
               this._state = REQUEST_URL
             }
