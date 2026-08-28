@@ -1744,12 +1744,6 @@ test('request, bare lf rejected', async (t) => {
   )
 })
 
-test('request, leading crlf before request line rejected', async (t) => {
-  const parser = new HTTPParser()
-
-  await t.exception(() => [...parser.push('\r\nGET / HTTP/1.0\r\n\r\n')], /INVALID_MESSAGE/)
-})
-
 test('request, duplicate content-length with differing case rejected', async (t) => {
   const parser = new HTTPParser()
 
@@ -1849,4 +1843,114 @@ Content-Length: 0\r
 
   t.alike(result[0].headers['set-cookie'], ['a=1'])
   t.alike(result[2].headers['set-cookie'], ['b=2'])
+})
+
+// RFC 9112 asks that an empty line before the start line be ignored, as a peer
+// that ends a message with a stray CRLF leaves one behind.
+test('request, empty line before the request line is ignored', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `\r
+\r
+GET /users HTTP/1.1\r
+Host: example.com\r
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].type, REQUEST)
+  t.is(result[0].method, 'GET')
+  t.is(result[0].url, '/users')
+  t.is(result[1].type, END)
+})
+
+test('response, empty line before the status line is ignored', (t) => {
+  const parser = new HTTPParser()
+
+  const input = `\r
+HTTP/1.1 200 OK\r
+Content-Length: 0\r
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].type, RESPONSE)
+  t.is(result[0].code, 200)
+  t.is(result[1].type, END)
+})
+
+test('request, empty line before the request line arriving in pieces', (t) => {
+  const parser = new HTTPParser()
+
+  const result = [
+    ...parser.push('\r'),
+    ...parser.push('\nGET /users HTTP/1.1\r\nHost: example.com\r\n\r\n')
+  ]
+
+  t.is(result[0].type, REQUEST)
+  t.is(result[0].url, '/users')
+  t.is(result[1].type, END)
+})
+
+// Only a whole empty line is ignored. A carriage return that stands on its own
+// would otherwise let a peer split the start line.
+test('request, carriage return without a line feed is refused', async (t) => {
+  const parser = new HTTPParser()
+
+  await t.exception(() => [...parser.push('\rGET / HTTP/1.1\r\n\r\n')], /INVALID_MESSAGE/)
+})
+
+test('request, carriage return part way through the method is refused', async (t) => {
+  const parser = new HTTPParser()
+
+  await t.exception(() => [...parser.push('GE\r\nT / HTTP/1.1\r\n\r\n')], /INVALID_MESSAGE/)
+})
+
+test('request, empty lines count towards the header size', async (t) => {
+  const parser = new HTTPParser({ maxHeaderSize: 8 })
+
+  await t.exception(() => [...parser.push('\r\n'.repeat(16))], /HEADER_OVERFLOW/)
+})
+
+test('empty line followed by the end of the stream is not a truncated message', (t) => {
+  const parser = new HTTPParser()
+
+  t.alike([...parser.push('\r\n')], [])
+  t.alike([...parser.end()], [])
+})
+
+// Zero turns a limit off, as a caller that wants no limit has no other way of
+// saying so.
+test('request, a header size limit of zero is no limit', (t) => {
+  const parser = new HTTPParser({ maxHeaderSize: 0 })
+
+  const input = `GET /users HTTP/1.1\r
+Host: example.com\r
+X-Large: ${'A'.repeat(100000)}\r
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].type, REQUEST)
+  t.is(result[0].headers['x-large'].length, 100000)
+})
+
+test('request, a header count limit of zero is no limit', (t) => {
+  const parser = new HTTPParser({ maxHeaderSize: 1024 * 1024, maxHeadersCount: 0 })
+
+  const headers = Array.from({ length: 5000 }, (_, i) => `X-Header-${i}: value\r`).join('\n')
+
+  const input = `GET /users HTTP/1.1\r
+Host: example.com\r
+${headers}
+\r
+`
+
+  const result = [...parser.push(input)]
+
+  t.is(result[0].type, REQUEST)
+  t.is(result[0].headers['x-header-4999'], 'value')
 })
