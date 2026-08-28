@@ -1038,6 +1038,66 @@ test('chunked response, chunk extension with control character rejected', async 
   await t.exception(() => [...parser.push(input)], /INVALID_CHUNK_LENGTH/)
 })
 
+test('request, method that nothing speaks is rejected', async (t) => {
+  for (const method of ['FOO', 'get', 'Get', 'GETT', 'G']) {
+    const parser = new HTTPParser()
+
+    await t.exception(
+      () => [...parser.push(method + ' / HTTP/1.1\r\nHost: example.com\r\n\r\n')],
+      /INVALID_METHOD/,
+      method + ' is refused'
+    )
+  }
+})
+
+test('request, every method that is spoken is parsed', (t) => {
+  const methods = [
+    'ACL',
+    'BIND',
+    'CHECKOUT',
+    'CONNECT',
+    'COPY',
+    'DELETE',
+    'GET',
+    'HEAD',
+    'LINK',
+    'LOCK',
+    'M-SEARCH',
+    'MERGE',
+    'MKACTIVITY',
+    'MKCALENDAR',
+    'MKCOL',
+    'MOVE',
+    'NOTIFY',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PROPFIND',
+    'PROPPATCH',
+    'PURGE',
+    'PUT',
+    'QUERY',
+    'REBIND',
+    'REPORT',
+    'SEARCH',
+    'SOURCE',
+    'SUBSCRIBE',
+    'TRACE',
+    'UNBIND',
+    'UNLINK',
+    'UNLOCK',
+    'UNSUBSCRIBE'
+  ]
+
+  for (const method of methods) {
+    const parser = new HTTPParser()
+
+    const result = [...parser.push(method + ' / HTTP/1.1\r\nHost: example.com\r\n\r\n')]
+
+    t.is(result[0].method, method)
+  }
+})
+
 test('request, slash in method name rejected', async (t) => {
   const parser = new HTTPParser()
 
